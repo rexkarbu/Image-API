@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js build output
+.next/
+out/
+*.tsbuildinfo
+
+# Production
+build/
+dist/
+
+# Environment files
+.env
+.env*.local
+.env.development
+.env.test
+.env.production
+.env.*
+!.env.example
+
+# Debug / Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / Editor
+.DS_Store
+*.pem
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Drizzle Studio / SQLite temp files
+.drizzle/
