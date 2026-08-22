@@ -11,7 +11,8 @@ CREATE TABLE "account" (
 	"scope" text,
 	"password" text,
 	"created_at" timestamp with time zone NOT NULL,
-	"updated_at" timestamp with time zone NOT NULL
+	"updated_at" timestamp with time zone NOT NULL,
+	"issuer" text
 );
 --> statement-breakpoint
 CREATE TABLE "session" (

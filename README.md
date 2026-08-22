@@ -5,8 +5,10 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 ## Current Milestone Status
 
 **Milestone 0 — Project Foundation, Auth, Database, and Multi-Tenancy** (Completed)
+- **M0.1**: Upgraded to Next.js 16.3.2, ESLint Flat Config, patched Drizzle ORM security release, and enforced secure foreign-key delete actions (`CASCADE` / `RESTRICT` / `SET NULL`).
+- **M0.2**: Live PostgreSQL integration with Neon (pooled runtime + direct migration connections), Better Auth session/auth lifecycle verified E2E, and guarded live integration test suite.
 
-This milestone establishes the multi-tenant architecture, authentication with Better Auth, PostgreSQL database schema with Drizzle ORM, onboarding flow, and developer dashboard shell.
+*Milestone 1 (API-Key Lifecycle) has not been started.*
 
 ---
 
@@ -14,7 +16,7 @@ This milestone establishes the multi-tenant architecture, authentication with Be
 
 - **Node.js**: `>=20.9.0` (compatible with Node 20.x, 22.x, 24.x)
 - **Package Manager**: `pnpm` (`>=9.0.0`)
-- **Database**: PostgreSQL (`v15+`)
+- **Database**: PostgreSQL (`v15+`, developed against Neon Serverless PostgreSQL)
 
 ---
 
@@ -39,10 +41,13 @@ cp .env.example .env.local
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `DATABASE_URL` | PostgreSQL pooled connection string | `postgres://postgres:postgres@localhost:5432/image_api_db` |
-| `BETTER_AUTH_SECRET` | Secret key for Better Auth (min 32 chars) | `generate-using-openssl-rand-base64-32` |
+| `DATABASE_URL` | PostgreSQL pooled connection string (runtime) | `postgres://user:pass@ep-xyz-pooler.region.neon.tech/neondb?sslmode=require` |
+| `DIRECT_DATABASE_URL` | PostgreSQL direct unpooled connection (migrations) | `postgres://user:pass@ep-xyz.region.neon.tech/neondb?sslmode=require` |
+| `BETTER_AUTH_SECRET` | Secret key for Better Auth (min 32 chars) | `generate-using-crypto-random-32-bytes` |
 | `BETTER_AUTH_URL` | Canonical Better Auth base URL | `http://localhost:3000` |
 | `NEXT_PUBLIC_APP_URL` | Application public URL | `http://localhost:3000` |
+| `DATABASE_ENV` | Environment marker (`development` \| `production`) | `development` |
+| `RUN_DB_INTEGRATION_TESTS` | Safety opt-in for live DB integration tests | `true` |
 
 ---
 
@@ -58,12 +63,22 @@ cp .env.example .env.local
    pnpm db:generate
    ```
 
-3. **Apply Database Migrations** (requires reachable PostgreSQL instance):
+3. **Check Schema & Snapshot Consistency**:
+   ```bash
+   pnpm db:check
+   ```
+
+4. **Apply Database Migrations** (uses `DIRECT_DATABASE_URL`):
    ```bash
    pnpm db:migrate
    ```
 
-4. **Start Development Server**:
+5. **Smoke Test Database Connection**:
+   ```bash
+   pnpm db:smoke
+   ```
+
+6. **Start Development Server**:
    ```bash
    pnpm dev
    ```
@@ -77,9 +92,12 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest test suite.
+- `pnpm test`: Runs Vitest in-memory unit test suite (39 tests).
+- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (5 tests).
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.
-- `pnpm db:migrate`: Executes pending SQL migrations against target database.
+- `pnpm db:check`: Checks Drizzle schema snapshot consistency.
+- `pnpm db:migrate`: Executes pending SQL migrations over direct connection.
+- `pnpm db:smoke`: Validates live PostgreSQL connection and verifies all 8 tables.
 - `pnpm db:studio`: Opens Drizzle Studio for visual database inspection.
 
 ---

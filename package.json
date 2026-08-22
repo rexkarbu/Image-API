@@ -10,9 +10,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/db/migrate.ts",
-    "db:studio": "drizzle-kit studio"
+    "test:integration": "dotenv -e .env.local -e .env -- vitest run --config vitest.integration.config.ts",
+    "db:generate": "dotenv -e .env.local -e .env -- drizzle-kit generate",
+    "db:migrate": "dotenv -e .env.local -e .env -- tsx src/db/migrate.ts",
+    "db:check": "dotenv -e .env.local -e .env -- drizzle-kit check",
+    "db:smoke": "dotenv -e .env.local -e .env -- tsx src/db/smoke.ts",
+    "db:studio": "dotenv -e .env.local -e .env -- drizzle-kit studio"
   },
   "engines": {
     "node": ">=20.9.0",
@@ -38,6 +41,7 @@
     "@types/react-dom": "^19.0.3",
     "autoprefixer": "^10.4.20",
     "dotenv": "^16.4.7",
+    "dotenv-cli": "^11.0.0",
     "drizzle-kit": "^0.30.4",
     "eslint": "^9.20.1",
     "eslint-config-next": "16.3.2",

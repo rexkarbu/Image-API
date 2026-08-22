@@ -1,5 +1,5 @@
 {
-  "id": "601ab4fc-d7af-4c0a-b832-dc044866ce1d",
+  "id": "e715b12b-6682-49ce-96f6-ed17b837224d",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -85,6 +85,12 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

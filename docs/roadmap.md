@@ -1,14 +1,9 @@
 # Engineering Roadmap
 
 - [x] **Milestone 0: Foundation, Auth, Database, and Multi-Tenancy**
-  - Next.js App Router scaffolding with TypeScript strict mode.
-  - Typed server-only environment validation with Zod.
-  - PostgreSQL schema and Drizzle ORM setup.
-  - Better Auth email/password authentication with Drizzle adapter.
-  - Organization & membership data model with atomic onboarding flow.
-  - Multi-tenant data access helpers and security invariant enforcement.
-  - Protected developer dashboard shell with real foundational metadata.
-  - Foundational unit test suite and initial migration generation.
+  - **M0.0**: Next.js App Router scaffolding, strict TypeScript, Zod environment validation, PostgreSQL Drizzle schema, Better Auth email/password authentication, organization onboarding, and foundational unit test suite.
+  - **M0.1**: Upgraded framework to Next.js 16.3.2, ESLint Flat Config, patched Drizzle ORM security release, and enforced intentional foreign-key delete actions (`CASCADE` / `RESTRICT` / `SET NULL`).
+  - **M0.2**: Live PostgreSQL integration with Neon (pooled runtime + direct migration connections), Better Auth session/auth lifecycle verified E2E, and guarded live integration test suite.
 
 - [ ] **Milestone 1: Secure API-Key Lifecycle**
   - Cryptographic API key generation with SHA-256 hashing.
