@@ -5,11 +5,17 @@ import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { UsageFilters, UsageRangePreset, FilterOptionDto } from "@/types/usage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Filter, X } from "lucide-react";
+import { X, AlertCircle, RotateCcw } from "lucide-react";
+import {
+  computeCalendarDayStartUtc,
+  computeCalendarDayEndUtc,
+  MAX_CUSTOM_RANGE_DAYS,
+} from "@/lib/validations/usage-filters";
 
 interface UsageFiltersBarProps {
   activeFilters: UsageFilters;
   filterOptions: FilterOptionDto;
+  filterError?: string | null;
 }
 
 const RANGE_PRESETS: { value: UsageRangePreset; label: string }[] = [
@@ -20,22 +26,132 @@ const RANGE_PRESETS: { value: UsageRangePreset; label: string }[] = [
   { value: "custom", label: "Custom" },
 ];
 
-export function UsageFiltersBar({ activeFilters, filterOptions }: UsageFiltersBarProps) {
+function CustomDateRangePanel({
+  initialFrom,
+  initialTo,
+  onApply,
+}: {
+  initialFrom?: string;
+  initialTo?: string;
+  onApply: (fromIso: string, toIso: string) => void;
+}) {
+  const [customFrom, setCustomFrom] = useState<string>(
+    initialFrom ? initialFrom.substring(0, 10) : ""
+  );
+  const [customTo, setCustomTo] = useState<string>(
+    initialTo
+      ? (() => {
+          const d = new Date(initialTo);
+          d.setUTCDate(d.getUTCDate() - 1);
+          return d.toISOString().substring(0, 10);
+        })()
+      : ""
+  );
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const handleApply = () => {
+    setLocalError(null);
+    if (!customFrom || !customTo) {
+      setLocalError("Please select both start and end calendar dates.");
+      return;
+    }
+
+    const fromUtc = computeCalendarDayStartUtc(customFrom);
+    const toUtc = computeCalendarDayEndUtc(customTo);
+
+    if (!fromUtc || !toUtc) {
+      setLocalError("Invalid calendar date selection.");
+      return;
+    }
+
+    const fromMs = new Date(fromUtc).getTime();
+    const toMs = new Date(toUtc).getTime();
+
+    if (fromMs >= toMs) {
+      setLocalError("Start date must be on or before end date.");
+      return;
+    }
+
+    const diffDays = (toMs - fromMs) / (24 * 60 * 60 * 1000);
+    if (diffDays > MAX_CUSTOM_RANGE_DAYS) {
+      setLocalError(`Custom date range cannot exceed ${MAX_CUSTOM_RANGE_DAYS} calendar days.`);
+      return;
+    }
+
+    onApply(fromUtc, toUtc);
+  };
+
+  return (
+    <div className="pt-2 border-t border-neutral-100 dark:border-neutral-800 space-y-2">
+      <div className="flex flex-wrap items-center gap-2.5 text-xs">
+        <div className="flex items-center space-x-1.5">
+          <label htmlFor="custom-from" className="font-medium text-neutral-500 text-[11px]">
+            From:
+          </label>
+          <Input
+            id="custom-from"
+            type="date"
+            value={customFrom}
+            onChange={(e) => {
+              setCustomFrom(e.target.value);
+              setLocalError(null);
+            }}
+            className="h-8 text-xs font-mono w-36"
+          />
+        </div>
+
+        <div className="flex items-center space-x-1.5">
+          <label htmlFor="custom-to" className="font-medium text-neutral-500 text-[11px]">
+            To:
+          </label>
+          <Input
+            id="custom-to"
+            type="date"
+            value={customTo}
+            onChange={(e) => {
+              setCustomTo(e.target.value);
+              setLocalError(null);
+            }}
+            className="h-8 text-xs font-mono w-36"
+          />
+        </div>
+
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleApply}
+          disabled={!customFrom || !customTo}
+          className="h-8 text-xs px-3 font-medium"
+        >
+          Apply Range
+        </Button>
+      </div>
+
+      {localError && (
+        <p className="text-[11px] text-red-600 dark:text-red-400 font-medium">
+          {localError}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function UsageFiltersBar({
+  activeFilters,
+  filterOptions,
+  filterError,
+}: UsageFiltersBarProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const [customFrom, setCustomFrom] = useState<string>(
-    activeFilters.from ? activeFilters.from.substring(0, 10) : ""
-  );
-  const [customTo, setCustomTo] = useState<string>(
-    activeFilters.to ? activeFilters.to.substring(0, 10) : ""
-  );
+  const [isCustomLocallyOpen, setIsCustomLocallyOpen] = useState<boolean>(false);
+  const isCustomOpen = isCustomLocallyOpen || activeFilters.range === "custom";
 
   const applyFilters = (updates: Partial<UsageFilters>) => {
     const params = new URLSearchParams(searchParams?.toString() || "");
 
-    // Clear cursor on filter change
+    // Clear pagination cursor on any filter change
     params.delete("cursor");
 
     const newRange = updates.range !== undefined ? updates.range : activeFilters.range;
@@ -79,46 +195,79 @@ export function UsageFiltersBar({ activeFilters, filterOptions }: UsageFiltersBa
     router.push(`${pathname}?${params.toString()}`);
   };
 
-  const handleResetFilters = () => {
-    router.push(pathname);
+  const handlePresetClick = (preset: UsageRangePreset) => {
+    if (preset === "custom") {
+      setIsCustomLocallyOpen(true);
+      return;
+    }
+
+    setIsCustomLocallyOpen(false);
+    applyFilters({ range: preset, from: undefined, to: undefined });
   };
 
-  const handleCustomApply = () => {
-    if (!customFrom || !customTo) return;
-    const fromDate = new Date(`${customFrom}T00:00:00.000Z`);
-    const toDate = new Date(`${customTo}T23:59:59.999Z`);
-    if (fromDate <= toDate) {
-      applyFilters({
-        range: "custom",
-        from: fromDate.toISOString(),
-        to: toDate.toISOString(),
-      });
-    }
+  const handleCustomApply = (fromUtc: string, toUtc: string) => {
+    setIsCustomLocallyOpen(false);
+    applyFilters({
+      range: "custom",
+      from: fromUtc,
+      to: toUtc,
+    });
+  };
+
+  const handleResetFilters = () => {
+    setIsCustomLocallyOpen(false);
+    router.push(pathname);
   };
 
   const hasActiveFilters =
     activeFilters.range !== "30d" ||
     !!activeFilters.apiKeyId ||
     !!activeFilters.endpoint ||
-    !!activeFilters.statusCode;
+    !!activeFilters.statusCode ||
+    !!filterError;
 
   return (
-    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4 shadow-sm space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        {/* Date Range Presets */}
+    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4 shadow-sm space-y-3">
+      {/* Filter Error Notice */}
+      {filterError && (
+        <div
+          role="alert"
+          className="p-3 rounded-md bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-amber-800 dark:text-amber-300"
+        >
+          <div className="flex items-center space-x-2">
+            <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span>{filterError}</span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleResetFilters}
+            className="h-7 text-xs border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900/40 space-x-1"
+          >
+            <RotateCcw className="h-3 w-3" />
+            <span>Reset to default</span>
+          </Button>
+        </div>
+      )}
+
+      {/* Preset Buttons & Reset Control */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Date Range Presets">
           {RANGE_PRESETS.map((preset) => {
-            const isSelected = activeFilters.range === preset.value;
+            const isSelected = isCustomOpen
+              ? preset.value === "custom"
+              : activeFilters.range === preset.value;
+
             return (
               <Button
                 key={preset.value}
                 variant={isSelected ? "default" : "outline"}
                 size="sm"
-                onClick={() => applyFilters({ range: preset.value })}
-                className={`h-7 px-2.5 text-xs font-mono ${
+                onClick={() => handlePresetClick(preset.value)}
+                className={`h-7 px-2.5 text-xs font-mono transition-colors focus-visible:ring-2 ${
                   isSelected
                     ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
-                    : "text-neutral-600 dark:text-neutral-400"
+                    : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                 }`}
               >
                 {preset.label}
@@ -127,7 +276,6 @@ export function UsageFiltersBar({ activeFilters, filterOptions }: UsageFiltersBa
           })}
         </div>
 
-        {/* Clear Filters Button */}
         {hasActiveFilters && (
           <Button
             variant="ghost"
@@ -141,43 +289,18 @@ export function UsageFiltersBar({ activeFilters, filterOptions }: UsageFiltersBa
         )}
       </div>
 
-      {/* Custom Date Range Selector (Only when custom selected) */}
-      {activeFilters.range === "custom" && (
-        <div className="pt-2 border-t border-neutral-100 dark:border-neutral-800 flex flex-wrap items-center gap-3 text-xs">
-          <div className="flex items-center space-x-2">
-            <label htmlFor="custom-from" className="font-medium text-neutral-500">From:</label>
-            <Input
-              id="custom-from"
-              type="date"
-              value={customFrom}
-              onChange={(e) => setCustomFrom(e.target.value)}
-              className="h-8 text-xs font-mono w-36"
-            />
-          </div>
-          <div className="flex items-center space-x-2">
-            <label htmlFor="custom-to" className="font-medium text-neutral-500">To:</label>
-            <Input
-              id="custom-to"
-              type="date"
-              value={customTo}
-              onChange={(e) => setCustomTo(e.target.value)}
-              className="h-8 text-xs font-mono w-36"
-            />
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleCustomApply}
-            disabled={!customFrom || !customTo}
-            className="h-8 text-xs px-3"
-          >
-            Apply Range
-          </Button>
-        </div>
+      {/* Custom Date Range Panel */}
+      {isCustomOpen && (
+        <CustomDateRangePanel
+          key={`${activeFilters.from || ""}_${activeFilters.to || ""}_${activeFilters.range}`}
+          initialFrom={activeFilters.from}
+          initialTo={activeFilters.to}
+          onApply={handleCustomApply}
+        />
       )}
 
-      {/* Granular Filters: API Key, Endpoint, Status Code */}
-      <div className="pt-3 border-t border-neutral-100 dark:border-neutral-800 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+      {/* Granular Filters */}
+      <div className="pt-2.5 border-t border-neutral-100 dark:border-neutral-800 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
         {/* API Key Selector */}
         <div className="space-y-1">
           <label htmlFor="filter-api-key" className="block text-[11px] font-medium text-neutral-500">
@@ -236,7 +359,7 @@ export function UsageFiltersBar({ activeFilters, filterOptions }: UsageFiltersBa
             <option value="">All Status Codes</option>
             {filterOptions.statusCodeOptions.map((s) => (
               <option key={s} value={String(s)}>
-                {s} OK
+                {s} Success
               </option>
             ))}
           </select>

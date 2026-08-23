@@ -71,10 +71,77 @@ describe("Usage Analytics Service Unit Tests", () => {
     expect(data.eventsPage.events).toEqual([]);
     expect(data.eventsPage.hasMore).toBe(false);
     expect(data.eventsPage.nextCursor).toBeNull();
+    expect(data.filterError).toBeNull();
 
     // Verify time series buckets are generated and all have 0 units
     expect(data.timeSeries.length).toBeGreaterThan(0);
     expect(data.timeSeries.every((b) => b.units === 0)).toBe(true);
+  });
+
+  it("handles explicit invalid filter input returning typed filterError without running queries", async () => {
+    const data = await getUsageDashboardData({
+      organizationId: "org-invalid-filter-test",
+      rawFilters: { statusCode: "999" }, // invalid status code
+      now: new Date("2026-08-23T16:00:00.000Z"),
+    });
+
+    expect(data.filterError).not.toBeNull();
+    expect(data.filterError).toContain("Invalid status code");
+    expect(data.summary.totalUnits).toBe(0);
+    expect(data.eventsPage.events).toEqual([]);
+  });
+
+  it("safely handles unmatched or foreign key IDs falling back to Unknown Key without leakage", async () => {
+    const mockSelect = vi.mocked(db.select);
+    const mockSelectDistinct = vi.mocked(db.selectDistinct);
+
+    // Event has apiKeyId 'foreign-key-999', so left join on org matches null
+    const mockEvents = [
+      {
+        id: "evt-orphaned",
+        createdAt: new Date("2026-08-23T10:00:00.000Z"),
+        apiKeyId: "foreign-key-999",
+        endpoint: "/v1/images/transform",
+        statusCode: 200,
+        units: 1,
+        apiKeyName: null,
+        keyPrefix: null,
+      },
+    ];
+
+    const makeQueryPromise = (val: any) => {
+      const p = Promise.resolve(val);
+      return Object.assign(p, {
+        orderBy: vi.fn().mockImplementation(() => makeQueryPromise(val)),
+        groupBy: vi.fn().mockImplementation(() => makeQueryPromise(val)),
+        limit: vi.fn().mockImplementation(() => makeQueryPromise(val)),
+        where: vi.fn().mockImplementation(() => makeQueryPromise(val)),
+      });
+    };
+
+    mockSelect.mockImplementation(() => ({
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockImplementation(() => makeQueryPromise([])),
+        leftJoin: vi.fn().mockReturnValue({
+          where: vi.fn().mockImplementation(() => makeQueryPromise(mockEvents)),
+        }),
+      }),
+    } as any));
+
+    mockSelectDistinct.mockImplementation(() => ({
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockImplementation(() => makeQueryPromise([])),
+      }),
+    } as any));
+
+    const data = await getUsageDashboardData({
+      organizationId: "org-foreign-key-test",
+      now: new Date("2026-08-23T16:00:00.000Z"),
+    });
+
+    expect(data.eventsPage.events.length).toBe(1);
+    expect(data.eventsPage.events[0].apiKeyName).toBe("Unknown Key");
+    expect(data.eventsPage.events[0].maskedKey).toBe("img_live_••••••••");
   });
 
   it("verifies returned DTOs never contain key_hash or plaintext secret properties", async () => {

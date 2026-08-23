@@ -7,14 +7,10 @@ interface UsageChartProps {
 
 export function UsageChart({ timeSeries, totalUnits }: UsageChartProps) {
   const maxUnits = Math.max(...timeSeries.map((b) => b.units), 1);
-  const chartHeight = 160;
-
-  // Decide how many x-axis labels to display based on bucket count
-  const labelInterval = Math.max(1, Math.floor(timeSeries.length / 6));
 
   if (totalUnits === 0) {
     return (
-      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-sm space-y-4">
+      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-5 shadow-sm space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
@@ -32,7 +28,7 @@ export function UsageChart({ timeSeries, totalUnits }: UsageChartProps) {
             No transformation events in this range
           </p>
           <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
-            Incoming requests to <code className="bg-neutral-100 dark:bg-neutral-800 px-1 py-0.5 rounded">POST /v1/images/transform</code> will appear here in real-time.
+            Incoming requests to <code className="bg-neutral-100 dark:bg-neutral-800 px-1 py-0.5 rounded">POST /v1/images/transform</code> will appear here in near-real-time.
           </p>
         </div>
       </div>
@@ -40,7 +36,7 @@ export function UsageChart({ timeSeries, totalUnits }: UsageChartProps) {
   }
 
   return (
-    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-sm space-y-4">
+    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-5 shadow-sm space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
@@ -58,28 +54,35 @@ export function UsageChart({ timeSeries, totalUnits }: UsageChartProps) {
         </div>
       </div>
 
-      {/* SVG Bar Chart Visualization */}
-      <div className="relative pt-4 pb-2" aria-hidden="true">
-        <div className="flex items-end space-x-1 sm:space-x-1.5 h-40 w-full">
-          {timeSeries.map((bucket, idx) => {
+      {/* SVG / CSS Bar Chart Visualization with horizontal scrolling for large bucket sets (e.g. 90d) */}
+      <div className="relative pt-4 pb-1 overflow-x-auto" aria-hidden="true">
+        <div
+          className="flex items-end space-x-1 sm:space-x-1.5 h-36 w-full"
+          style={{ minWidth: timeSeries.length > 30 ? `${timeSeries.length * 10}px` : "100%" }}
+        >
+          {timeSeries.map((bucket) => {
             const heightPercent = Math.max((bucket.units / maxUnits) * 100, bucket.units > 0 ? 4 : 1);
             return (
               <div
                 key={bucket.timestamp}
-                className="flex-1 flex flex-col items-center justify-end h-full group relative"
+                className="flex-1 flex flex-col items-center justify-end h-full group relative min-w-[3px]"
               >
                 {/* Hover / Focus Tooltip */}
                 <div className="absolute bottom-full mb-1 hidden group-hover:flex group-focus:flex flex-col items-center pointer-events-none z-10">
                   <div className="bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[10px] rounded px-2 py-1 shadow whitespace-nowrap">
-                    <div className="font-semibold font-mono">{bucket.units.toLocaleString()} {bucket.units === 1 ? "unit" : "units"}</div>
-                    <div className="text-[9px] text-neutral-400 dark:text-neutral-600">{bucket.label} (UTC)</div>
+                    <div className="font-semibold font-mono">
+                      {bucket.units.toLocaleString()} {bucket.units === 1 ? "unit" : "units"}
+                    </div>
+                    <div className="text-[9px] text-neutral-400 dark:text-neutral-600">
+                      {bucket.label} (UTC)
+                    </div>
                   </div>
                 </div>
 
                 {/* Bar Element */}
                 <div
                   style={{ height: `${heightPercent}%` }}
-                  className={`w-full rounded-t transition-all ${
+                  className={`w-full rounded-t motion-safe:transition-all ${
                     bucket.units > 0
                       ? "bg-neutral-900 dark:bg-neutral-100 group-hover:bg-neutral-700 dark:group-hover:bg-neutral-300"
                       : "bg-neutral-100 dark:bg-neutral-800"
@@ -96,7 +99,7 @@ export function UsageChart({ timeSeries, totalUnits }: UsageChartProps) {
           {timeSeries.length > 2 && (
             <span>{timeSeries[Math.floor(timeSeries.length / 2)]?.label || ""}</span>
           )}
-          <span>{timeSeries[timeSeries.length - 1]?.label || "Now"} (UTC)</span>
+          <span>{timeSeries[timeSeries.length - 1]?.label || "End"} (UTC)</span>
         </div>
       </div>
 

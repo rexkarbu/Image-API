@@ -19,20 +19,20 @@ export default async function DashboardLayout({
     <div className="flex min-h-screen flex-col bg-neutral-50 dark:bg-neutral-950">
       {/* Dashboard Top Navigation */}
       <header className="sticky top-0 z-40 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-6">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 min-h-16 py-2.5 sm:py-0 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3 sm:gap-6">
             <Link
               href="/dashboard"
-              className="font-bold text-base tracking-tight text-neutral-900 dark:text-neutral-100 flex items-center space-x-2"
+              className="font-bold text-base tracking-tight text-neutral-900 dark:text-neutral-100 flex items-center space-x-2 shrink-0"
             >
               <span>{siteConfig.name}</span>
             </Link>
 
             <DashboardNav />
 
-            <div className="hidden sm:flex items-center space-x-2 text-xs font-mono">
+            <div className="hidden md:flex items-center space-x-2 text-xs font-mono">
               <span className="text-neutral-400 dark:text-neutral-600">/</span>
-              <span className="font-medium text-neutral-700 dark:text-neutral-300 px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800">
+              <span className="font-medium text-neutral-700 dark:text-neutral-300 px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 truncate max-w-[140px]">
                 {tenantContext.organization.name}
               </span>
               <span className="text-neutral-500 capitalize">
@@ -41,12 +41,12 @@ export default async function DashboardLayout({
             </div>
           </div>
 
-          <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-3 sm:space-x-4 shrink-0">
             <div className="text-right hidden sm:block">
-              <div className="text-xs font-medium text-neutral-900 dark:text-neutral-100">
+              <div className="text-xs font-medium text-neutral-900 dark:text-neutral-100 truncate max-w-[150px]">
                 {tenantContext.user.name || tenantContext.user.email}
               </div>
-              <div className="text-[11px] text-neutral-500 dark:text-neutral-400">
+              <div className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate max-w-[150px]">
                 {tenantContext.user.email}
               </div>
             </div>

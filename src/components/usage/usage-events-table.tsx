@@ -42,7 +42,7 @@ export function UsageEventsTable({ eventsPage, activeFilters }: UsageEventsTable
 
   if (eventsPage.events.length === 0) {
     return (
-      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-sm space-y-4">
+      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-5 shadow-sm space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
             Recent Transformation Events
@@ -102,11 +102,11 @@ export function UsageEventsTable({ eventsPage, activeFilters }: UsageEventsTable
         <table className="w-full text-left text-xs">
           <thead className="bg-neutral-50/80 dark:bg-neutral-900/60 text-neutral-500 dark:text-neutral-400 font-mono text-[11px] border-b border-neutral-100 dark:border-neutral-800">
             <tr>
-              <th scope="col" className="py-2.5 px-4 font-medium">Timestamp (UTC)</th>
-              <th scope="col" className="py-2.5 px-4 font-medium">API Key</th>
-              <th scope="col" className="py-2.5 px-4 font-medium">Endpoint</th>
-              <th scope="col" className="py-2.5 px-4 font-medium">Status</th>
-              <th scope="col" className="py-2.5 px-4 font-medium text-right">Units</th>
+              <th scope="col" className="py-2.5 px-4 font-medium whitespace-nowrap">Timestamp (UTC)</th>
+              <th scope="col" className="py-2.5 px-4 font-medium whitespace-nowrap">API Key</th>
+              <th scope="col" className="py-2.5 px-4 font-medium whitespace-nowrap">Endpoint</th>
+              <th scope="col" className="py-2.5 px-4 font-medium whitespace-nowrap">Status</th>
+              <th scope="col" className="py-2.5 px-4 font-medium text-right whitespace-nowrap">Units</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800 font-mono text-[11px]">
@@ -118,11 +118,11 @@ export function UsageEventsTable({ eventsPage, activeFilters }: UsageEventsTable
                 <td className="py-3 px-4 text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
                   {formatEventUtc(event.createdAt)}
                 </td>
-                <td className="py-3 px-4 whitespace-nowrap">
-                  <div className="font-sans font-medium text-neutral-900 dark:text-neutral-100">
+                <td className="py-3 px-4 whitespace-nowrap max-w-[200px]">
+                  <div className="font-sans font-medium text-neutral-900 dark:text-neutral-100 truncate">
                     {event.apiKeyName}
                   </div>
-                  <div className="text-[10px] text-neutral-400">
+                  <div className="text-[10px] text-neutral-400 font-mono truncate">
                     {event.maskedKey}
                   </div>
                 </td>
@@ -131,7 +131,7 @@ export function UsageEventsTable({ eventsPage, activeFilters }: UsageEventsTable
                 </td>
                 <td className="py-3 px-4 whitespace-nowrap">
                   <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50">
-                    {event.statusCode} OK
+                    {event.statusCode} Success
                   </span>
                 </td>
                 <td className="py-3 px-4 text-right font-semibold text-neutral-900 dark:text-neutral-100 whitespace-nowrap">

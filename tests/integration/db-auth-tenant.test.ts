@@ -29,6 +29,8 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
   // Created key IDs and usage IDs for scoped cleanup
   const createdKeyIds: string[] = [];
   const createdUsageIds: string[] = [];
+  const createdOrgIds: string[] = [];
+  const createdUserIds: string[] = [];
 
   beforeAll(async () => {
     // 1. Enforce strict non-production environment safety guards
@@ -36,6 +38,7 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
 
     // 2. Insert test user fixtures
     const now = new Date();
+    createdUserIds.push(userAId, userBId, memberAId);
     await db.insert(user).values([
       {
         id: userAId,
@@ -66,9 +69,11 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
     // 3. Create Org A and Org B
     const contextA = await createOrganizationWithMembership(userAId, "Org A Integration");
     orgAId = contextA.organization.id;
+    createdOrgIds.push(orgAId);
 
     const contextB = await createOrganizationWithMembership(userBId, "Org B Integration");
     orgBId = contextB.organization.id;
+    createdOrgIds.push(orgBId);
 
     // 4. Add Member A to Org A with 'member' role
     await db.insert(organizationMembers).values({
@@ -90,12 +95,13 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
         await db.delete(apiKeyAuditEvents).where(inArray(apiKeyAuditEvents.apiKeyId, createdKeyIds));
         await db.delete(apiKeys).where(inArray(apiKeys.id, createdKeyIds));
       }
-      if (orgAId || orgBId) {
-        const orgIds = [orgAId, orgBId].filter(Boolean);
-        await db.delete(organizationMembers).where(inArray(organizationMembers.organizationId, orgIds));
-        await db.delete(organizations).where(inArray(organizations.id, orgIds));
+      if (createdOrgIds.length > 0) {
+        await db.delete(organizationMembers).where(inArray(organizationMembers.organizationId, createdOrgIds));
+        await db.delete(organizations).where(inArray(organizations.id, createdOrgIds));
       }
-      await db.delete(user).where(inArray(user.id, [userAId, userBId, memberAId]));
+      if (createdUserIds.length > 0) {
+        await db.delete(user).where(inArray(user.id, createdUserIds));
+      }
     } catch (err) {
       console.error("⚠️ Failed to clean up integration test fixture rows:", (err as Error).message);
     } finally {
@@ -1022,5 +1028,265 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
     const overviewA = await getOverviewStats(orgAId);
     expect(overviewA.currentMonthUnits).toBeGreaterThanOrEqual(3);
     expect(overviewA.activeKeysCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("exercises genuine 2-page deterministic cursor pagination on isolated 28-row fixture with shared boundary timestamps", async () => {
+    // 1. Create a dedicated isolated tenant (Org C)
+    const userCId = `test-user-c-${crypto.randomUUID()}`;
+    createdUserIds.push(userCId);
+    await db.insert(user).values({
+      id: userCId,
+      name: "Test User C (Pagination)",
+      email: `user-c-${crypto.randomUUID()}@example.com`,
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const contextC = await createOrganizationWithMembership(userCId, "Org C Pagination Fixture");
+    const orgCId = contextC.organization.id;
+    createdOrgIds.push(orgCId);
+
+    const keyC1 = await createApiKey(
+      { organizationId: orgCId, userId: userCId, role: "owner" },
+      { name: "Key C1", scopes: "image:transform" }
+    );
+    createdKeyIds.push(keyC1.key.id);
+
+    // 2. Insert exactly 28 events. Events 23, 24, 25 share the EXACT same timestamp at the page boundary.
+    const baseTime = new Date("2026-08-23T12:00:00.000Z");
+    const sharedBoundaryTime = new Date(baseTime.getTime() - 25 * 1000);
+
+    const eventRowsToInsert: Array<{
+      id: string;
+      requestId: string;
+      organizationId: string;
+      apiKeyId: string;
+      endpoint: string;
+      units: number;
+      statusCode: number;
+      createdAt: Date;
+    }> = [];
+
+    for (let i = 0; i < 28; i++) {
+      let eventTime: Date;
+      if (i >= 23 && i <= 25) {
+        // 3 events sharing the exact boundary timestamp
+        eventTime = sharedBoundaryTime;
+      } else {
+        // Deterministic offset in seconds strictly before baseTime
+        eventTime = new Date(baseTime.getTime() - (i + 1) * 1000);
+      }
+
+      eventRowsToInsert.push({
+        id: crypto.randomUUID(),
+        requestId: crypto.randomBytes(32).toString("hex"),
+        organizationId: orgCId,
+        apiKeyId: keyC1.key.id,
+        endpoint: "/v1/images/transform",
+        units: 1,
+        statusCode: 200,
+        createdAt: eventTime,
+      });
+    }
+
+    const insertedEvents = await db.insert(usageEvents).values(eventRowsToInsert).returning({ id: usageEvents.id });
+    const insertedIds = insertedEvents.map((e) => e.id);
+    createdUsageIds.push(...insertedIds);
+
+    // 3. Query Page 1 (Limit 25)
+    const page1Data = await getUsageDashboardData({
+      organizationId: orgCId,
+      rawFilters: { range: "24h" },
+      now: baseTime,
+    });
+
+    expect(page1Data.summary.totalUnits).toBe(28);
+    expect(page1Data.eventsPage.events.length).toBe(25);
+    expect(page1Data.eventsPage.hasMore).toBe(true);
+    expect(page1Data.eventsPage.nextCursor).not.toBeNull();
+
+    const page1Ids = page1Data.eventsPage.events.map((e) => e.id);
+
+    // 4. Query Page 2 using nextCursor
+    const page2Data = await getUsageDashboardData({
+      organizationId: orgCId,
+      rawFilters: { range: "24h", cursor: page1Data.eventsPage.nextCursor! },
+      now: baseTime,
+    });
+
+    expect(page2Data.eventsPage.events.length).toBe(3); // Exactly 28 - 25 = 3
+    expect(page2Data.eventsPage.hasMore).toBe(false);
+    expect(page2Data.eventsPage.nextCursor).toBeNull();
+
+    const page2Ids = page2Data.eventsPage.events.map((e) => e.id);
+
+    // 5. Complete Union & Disjointness Check (no missing events, no duplicates)
+    const combinedIds = [...page1Ids, ...page2Ids];
+    expect(combinedIds.length).toBe(28);
+    expect(new Set(combinedIds).size).toBe(28);
+
+    const insertedSet = new Set(insertedIds);
+    for (const id of combinedIds) {
+      expect(insertedSet.has(id)).toBe(true);
+    }
+
+    // 6. Strict Deterministic Ordering Verification across all 28 rows
+    const allRetrievedEvents = [...page1Data.eventsPage.events, ...page2Data.eventsPage.events];
+    for (let i = 0; i < allRetrievedEvents.length - 1; i++) {
+      const current = allRetrievedEvents[i];
+      const next = allRetrievedEvents[i + 1];
+      const currTime = new Date(current.createdAt).getTime();
+      const nextTime = new Date(next.createdAt).getTime();
+
+      if (currTime === nextTime) {
+        expect(current.id.localeCompare(next.id)).toBeGreaterThan(0);
+      } else {
+        expect(currTime).toBeGreaterThan(nextTime);
+      }
+    }
+
+    // 7. Cross-tenant cursor test: Pass Org C's cursor to Org A
+    const crossTenantCursorData = await getUsageDashboardData({
+      organizationId: orgAId,
+      rawFilters: { range: "24h", cursor: page1Data.eventsPage.nextCursor! },
+      now: baseTime,
+    });
+    // Org A's query with Org C's cursor never returns Org C events
+    expect(crossTenantCursorData.eventsPage.events.every((e) => e.apiKeyId !== keyC1.key.id)).toBe(true);
+
+    // 8. Malformed cursor fails closed before querying
+    const malformedCursorData = await getUsageDashboardData({
+      organizationId: orgCId,
+      rawFilters: { range: "24h", cursor: "malformed-bad-cursor" },
+      now: baseTime,
+    });
+    expect(malformedCursorData.filterError).toBe("Invalid pagination cursor.");
+    expect(malformedCursorData.eventsPage.events.length).toBe(0);
+
+    // 9. UTC Boundary inclusions/exclusions:
+    // Create an event at start of range and an event at end of range
+    const rangeStart = new Date("2026-08-20T00:00:00.000Z");
+    const rangeEnd = new Date("2026-08-22T00:00:00.000Z"); // 2 full calendar days: Aug 20 and Aug 21
+
+    const [evtAtStart, evtAtEnd] = await db
+      .insert(usageEvents)
+      .values([
+        {
+          id: crypto.randomUUID(),
+          requestId: crypto.randomBytes(32).toString("hex"),
+          organizationId: orgCId,
+          apiKeyId: keyC1.key.id,
+          endpoint: "/v1/images/transform",
+          units: 1,
+          statusCode: 200,
+          createdAt: rangeStart, // exactly on start boundary -> must be INCLUDED
+        },
+        {
+          id: crypto.randomUUID(),
+          requestId: crypto.randomBytes(32).toString("hex"),
+          organizationId: orgCId,
+          apiKeyId: keyC1.key.id,
+          endpoint: "/v1/images/transform",
+          units: 1,
+          statusCode: 200,
+          createdAt: rangeEnd, // exactly on end boundary -> must be EXCLUDED (exclusive)
+        },
+      ])
+      .returning({ id: usageEvents.id });
+
+    createdUsageIds.push(evtAtStart.id, evtAtEnd.id);
+
+    const boundaryData = await getUsageDashboardData({
+      organizationId: orgCId,
+      rawFilters: {
+        range: "custom",
+        from: rangeStart.toISOString(),
+        to: rangeEnd.toISOString(),
+      },
+      now: new Date("2026-08-23T00:00:00.000Z"),
+    });
+
+    const boundaryEventIds = boundaryData.eventsPage.events.map((e) => e.id);
+    expect(boundaryEventIds).toContain(evtAtStart.id); // Included
+    expect(boundaryEventIds).not.toContain(evtAtEnd.id); // Excluded
+
+    // 10. Empty organization test:
+    const userDId = `test-user-d-${crypto.randomUUID()}`;
+    createdUserIds.push(userDId);
+    await db.insert(user).values({
+      id: userDId,
+      name: "Test User D (Empty)",
+      email: `user-d-${crypto.randomUUID()}@example.com`,
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const contextD = await createOrganizationWithMembership(userDId, "Org D Empty");
+    const orgDId = contextD.organization.id;
+    createdOrgIds.push(orgDId);
+
+    const dataD = await getUsageDashboardData({
+      organizationId: orgDId,
+      rawFilters: { range: "30d" },
+      now: baseTime,
+    });
+
+    expect(dataD.summary.totalUnits).toBe(0);
+    expect(dataD.summary.currentMonthUnits).toBe(0);
+    expect(dataD.summary.activeKeysCount).toBe(0);
+    expect(dataD.summary.latestEventAt).toBeNull();
+    expect(dataD.keyBreakdown).toEqual([]);
+    expect(dataD.eventsPage.events).toEqual([]);
+    expect(dataD.eventsPage.hasMore).toBe(false);
+    expect(dataD.filterError).toBeNull();
+
+    // 11. Zero database mutations during reads:
+    const countEventsBefore = await db.select({ count: sql<string>`count(*)` }).from(usageEvents);
+    const countKeysBefore = await db.select({ count: sql<string>`count(*)` }).from(apiKeys);
+    await getUsageDashboardData({ organizationId: orgCId, rawFilters: { range: "24h" }, now: baseTime });
+    const countEventsAfter = await db.select({ count: sql<string>`count(*)` }).from(usageEvents);
+    const countKeysAfter = await db.select({ count: sql<string>`count(*)` }).from(apiKeys);
+
+    expect(countEventsAfter[0].count).toBe(countEventsBefore[0].count);
+    expect(countKeysAfter[0].count).toBe(countKeysBefore[0].count);
+
+    // 12. Cross-tenant API key metadata protection on left join:
+    // Create an API key belonging to Org B
+    const keyForOrgB = await createApiKey(
+      { organizationId: orgBId, userId: userBId, role: "owner" },
+      { name: "Key OrgB Secret Target", scopes: "image:transform" }
+    );
+    createdKeyIds.push(keyForOrgB.key.id);
+
+    // Insert an event in Org C with apiKeyId belonging to Org B
+    const [evtMismatched] = await db
+      .insert(usageEvents)
+      .values({
+        id: crypto.randomUUID(),
+        requestId: crypto.randomBytes(32).toString("hex"),
+        organizationId: orgCId,
+        apiKeyId: keyForOrgB.key.id, // belongs to Org B
+        endpoint: "/v1/images/transform",
+        units: 1,
+        statusCode: 200,
+        createdAt: new Date(baseTime.getTime() - 100),
+      })
+      .returning({ id: usageEvents.id });
+
+    createdUsageIds.push(evtMismatched.id);
+
+    const dataCMismatched = await getUsageDashboardData({
+      organizationId: orgCId,
+      rawFilters: { range: "24h" },
+      now: baseTime,
+    });
+
+    const mismatchedEvent = dataCMismatched.eventsPage.events.find((e) => e.id === evtMismatched.id);
+    expect(mismatchedEvent).toBeDefined();
+    // Must NOT reveal Org B's key name ("Key B1 Main") or keyPrefix
+    expect(mismatchedEvent?.apiKeyName).toBe("Unknown Key");
+    expect(mismatchedEvent?.maskedKey).toBe("img_live_••••••••");
   });
 });

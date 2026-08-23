@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useTransition, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,12 +10,16 @@ const REFRESH_INTERVAL_MS = 30_000; // 30 seconds
 export function AutoRefresh() {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date>(new Date());
+  const isPendingRef = useRef(isPending);
+
+  useEffect(() => {
+    isPendingRef.current = isPending;
+  }, [isPending]);
 
   const handleManualRefresh = () => {
+    if (isPending) return;
     startTransition(() => {
       router.refresh();
-      setLastRefreshedAt(new Date());
     });
   };
 
@@ -23,13 +27,15 @@ export function AutoRefresh() {
     let timer: NodeJS.Timeout | null = null;
 
     const scheduleTimer = () => {
-      if (timer) clearInterval(timer);
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
       if (document.visibilityState === "visible") {
         timer = setInterval(() => {
-          if (document.visibilityState === "visible") {
+          if (document.visibilityState === "visible" && !isPendingRef.current) {
             startTransition(() => {
               router.refresh();
-              setLastRefreshedAt(new Date());
             });
           }
         }, REFRESH_INTERVAL_MS);
@@ -38,11 +44,12 @@ export function AutoRefresh() {
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        // Refresh immediately when returning to tab, then restart interval
-        startTransition(() => {
-          router.refresh();
-          setLastRefreshedAt(new Date());
-        });
+        // Trigger one immediate refresh if not pending
+        if (!isPendingRef.current) {
+          startTransition(() => {
+            router.refresh();
+          });
+        }
         scheduleTimer();
       } else if (timer) {
         clearInterval(timer);
@@ -69,10 +76,10 @@ export function AutoRefresh() {
         size="sm"
         onClick={handleManualRefresh}
         disabled={isPending}
-        className="h-8 px-2.5 text-xs font-medium space-x-1.5"
+        className="h-8 px-2.5 text-xs font-medium space-x-1.5 focus-visible:ring-2"
         aria-label="Refresh dashboard data"
       >
-        <RefreshCw className={`h-3.5 w-3.5 ${isPending ? "animate-spin text-neutral-900 dark:text-neutral-100" : ""}`} />
+        <RefreshCw className={`h-3.5 w-3.5 ${isPending ? "motion-safe:animate-spin text-neutral-900 dark:text-neutral-100" : ""}`} />
         <span>{isPending ? "Refreshing..." : "Refresh"}</span>
       </Button>
     </div>

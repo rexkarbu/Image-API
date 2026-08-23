@@ -82,7 +82,11 @@ export default async function DashboardPage() {
             {membership.role}
           </div>
           <div className="text-[11px] text-neutral-400 dark:text-neutral-500">
-            Full workspace administration
+            {membership.role === "owner"
+              ? "Full workspace administration"
+              : membership.role === "admin"
+                ? "Workspace management and key administration"
+                : "Read-only workspace access"}
           </div>
         </div>
       </div>

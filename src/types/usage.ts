@@ -83,4 +83,5 @@ export interface UsageDashboardData {
   eventsPage: UsagePageDto;
   filterOptions: FilterOptionDto;
   activeFilters: UsageFilters;
+  filterError?: string | null;
 }

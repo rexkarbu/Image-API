@@ -43,11 +43,14 @@ export async function getUsageDashboardData(
     throw new Error("Security Violation: organizationId is required for usage analytics queries.");
   }
 
-  const activeFilters = parseUsageFilters(rawFilters || {}, now);
+  const filterValidation = parseUsageFilters(rawFilters || {}, now);
+  const activeFilters = filterValidation.filters;
+  const filterError = filterValidation.success ? null : filterValidation.error;
+
   const boundaries = computeRangeBoundaries(activeFilters, now);
   const startOfMonth = getUtcMonthStart(now);
 
-  // Common where conditions for period usage
+  // Common where conditions for period usage - strictly tenant scoped
   const periodConditions = [
     eq(usageEvents.organizationId, organizationId),
     gte(usageEvents.createdAt, boundaries.start),
@@ -78,12 +81,14 @@ export async function getUsageDashboardData(
     distinctStatusCodesRes,
   ] = await Promise.all([
     // Selected period total units
-    db
-      .select({ total: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)` })
-      .from(usageEvents)
-      .where(and(...periodConditions)),
+    filterError
+      ? Promise.resolve([{ total: "0" }])
+      : db
+          .select({ total: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)` })
+          .from(usageEvents)
+          .where(and(...periodConditions)),
 
-    // Current month total units (org scoped)
+    // Current month total units (strictly org scoped)
     db
       .select({ total: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)` })
       .from(usageEvents)
@@ -95,7 +100,7 @@ export async function getUsageDashboardData(
         )
       ),
 
-    // Active API keys count
+    // Active API keys count (strictly org scoped)
     db
       .select({ count: count() })
       .from(apiKeys)
@@ -113,28 +118,30 @@ export async function getUsageDashboardData(
       .from(usageEvents)
       .where(eq(usageEvents.organizationId, organizationId)),
 
-    // Time-series aggregation
-    boundaries.bucketInterval === "hour"
-      ? db
-          .select({
-            bucket: sql<string>`to_char(date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
-            units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
-          })
-          .from(usageEvents)
-          .where(and(...periodConditions))
-          .groupBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
-          .orderBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`)
-      : db
-          .select({
-            bucket: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"00:00:00.000"Z"')`,
-            units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
-          })
-          .from(usageEvents)
-          .where(and(...periodConditions))
-          .groupBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
-          .orderBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`),
+    // Time-series aggregation (strictly org scoped)
+    filterError
+      ? Promise.resolve([])
+      : boundaries.bucketInterval === "hour"
+        ? db
+            .select({
+              bucket: sql<string>`to_char(date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+              units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
+            })
+            .from(usageEvents)
+            .where(and(...periodConditions))
+            .groupBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
+            .orderBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`)
+        : db
+            .select({
+              bucket: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"00:00:00.000"Z"')`,
+              units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
+            })
+            .from(usageEvents)
+            .where(and(...periodConditions))
+            .groupBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
+            .orderBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`),
 
-    // Organization's API keys for breakdown & filters
+    // Organization's API keys for breakdown & filters (strictly org scoped)
     db
       .select({
         id: apiKeys.id,
@@ -146,50 +153,60 @@ export async function getUsageDashboardData(
       .where(eq(apiKeys.organizationId, organizationId))
       .orderBy(desc(apiKeys.createdAt)),
 
-    // Usage by API key in selected period
-    db
-      .select({
-        apiKeyId: usageEvents.apiKeyId,
-        units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
-      })
-      .from(usageEvents)
-      .where(and(...periodConditions))
-      .groupBy(usageEvents.apiKeyId),
+    // Usage by API key in selected period (strictly org scoped)
+    filterError
+      ? Promise.resolve([])
+      : db
+          .select({
+            apiKeyId: usageEvents.apiKeyId,
+            units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
+          })
+          .from(usageEvents)
+          .where(and(...periodConditions))
+          .groupBy(usageEvents.apiKeyId),
 
-    // Event stream with stable cursor pagination
-    (() => {
-      const eventConditions = [...periodConditions];
-      const decodedCursor = decodeCursor(activeFilters.cursor);
+    // Event stream with stable cursor pagination (strictly org scoped with explicit tenant-scoped join)
+    filterError
+      ? Promise.resolve([])
+      : (() => {
+          const eventConditions = [...periodConditions];
+          const decodedCursor = decodeCursor(activeFilters.cursor, now);
 
-      if (decodedCursor) {
-        eventConditions.push(
-          or(
-            lt(usageEvents.createdAt, decodedCursor.createdAt),
-            and(
-              eq(usageEvents.createdAt, decodedCursor.createdAt),
-              lt(usageEvents.id, decodedCursor.id)
+          if (decodedCursor) {
+            eventConditions.push(
+              or(
+                lt(usageEvents.createdAt, decodedCursor.createdAt),
+                and(
+                  eq(usageEvents.createdAt, decodedCursor.createdAt),
+                  lt(usageEvents.id, decodedCursor.id)
+                )
+              )!
+            );
+          }
+
+          return db
+            .select({
+              id: usageEvents.id,
+              createdAt: usageEvents.createdAt,
+              apiKeyId: usageEvents.apiKeyId,
+              endpoint: usageEvents.endpoint,
+              statusCode: usageEvents.statusCode,
+              units: usageEvents.units,
+              apiKeyName: apiKeys.name,
+              keyPrefix: apiKeys.keyPrefix,
+            })
+            .from(usageEvents)
+            .leftJoin(
+              apiKeys,
+              and(
+                eq(usageEvents.apiKeyId, apiKeys.id),
+                eq(apiKeys.organizationId, organizationId)
+              )
             )
-          )!
-        );
-      }
-
-      return db
-        .select({
-          id: usageEvents.id,
-          createdAt: usageEvents.createdAt,
-          apiKeyId: usageEvents.apiKeyId,
-          endpoint: usageEvents.endpoint,
-          statusCode: usageEvents.statusCode,
-          units: usageEvents.units,
-          apiKeyName: apiKeys.name,
-          keyPrefix: apiKeys.keyPrefix,
-        })
-        .from(usageEvents)
-        .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
-        .where(and(...eventConditions))
-        .orderBy(desc(usageEvents.createdAt), desc(usageEvents.id))
-        .limit(PAGE_SIZE + 1);
-    })(),
+            .where(and(...eventConditions))
+            .orderBy(desc(usageEvents.createdAt), desc(usageEvents.id))
+            .limit(PAGE_SIZE + 1);
+        })(),
 
     // Distinct endpoints in org for filter dropdown
     db
@@ -284,7 +301,7 @@ export async function getUsageDashboardData(
     id: row.id,
     createdAt: row.createdAt.toISOString(),
     apiKeyId: row.apiKeyId,
-    apiKeyName: row.apiKeyName || "Deleted Key",
+    apiKeyName: row.apiKeyName || "Unknown Key",
     keyPrefix: row.keyPrefix || "img_live_unknown",
     maskedKey: row.keyPrefix ? `${row.keyPrefix}••••••••` : "img_live_••••••••",
     endpoint: row.endpoint,
@@ -336,6 +353,7 @@ export async function getUsageDashboardData(
     eventsPage,
     filterOptions,
     activeFilters,
+    filterError,
   };
 }
 

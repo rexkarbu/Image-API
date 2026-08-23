@@ -141,11 +141,12 @@
 
 ---
 
-## 6. Developer Dashboard & Usage Analytics Architecture (Milestone 3)
+## 6. Developer Dashboard & Usage Analytics Architecture (Milestone 3 & M3.1)
 
 ### Server-Only Tenant Analytics
 - Built in `src/lib/services/usage-analytics.ts` with explicit `import "server-only";` enforcement.
-- Enforces strict tenant isolation: every query is scoped by `organization_id` derived exclusively from `requireOrganizationContext()`.
+- Enforces strict tenant isolation: every query reading `usage_events` or joining `api_keys` is explicitly scoped by `organization_id` derived exclusively from `requireOrganizationContext()`.
+- Explicit tenant join: `and(eq(usageEvents.apiKeyId, apiKeys.id), eq(apiKeys.organizationId, organizationId))` ensures cross-tenant API key metadata cannot cross the join boundary even in the event of foreign or corrupted key IDs.
 - Parallel query execution (`Promise.all`) fetching period totals, current month volume, active API keys, latest event timestamps, UTC time series, and per-key breakdowns.
 
 ### Client-Safe Data Transfer Objects (DTOs)
@@ -154,19 +155,26 @@
 - Key secrets and key hashes are strictly scrubbed, exposing only non-sensitive masked prefixes (`img_live_ab12cd34••••••••`).
 
 ### Date Range Normalization & Deterministic Bucketing
-- Filter logic in `src/lib/validations/usage-filters.ts` normalizes URL search parameters into UTC timestamps with inclusive starts and exclusive ends.
+- Filter logic in `src/lib/validations/usage-filters.ts` normalizes URL search parameters into UTC timestamps with inclusive starts and exclusive ends `[start, end)`.
 - Preset ranges supported: `24h`, `7d`, `30d`, `month` (calendar month-to-date), and `custom` (up to 90 days).
 - Deterministic bucketing: Hourly intervals for spans <= 48 hours, daily intervals for spans > 48 hours.
+- Bucket generator models half-open intervals `[start, end)` using `current < end` to prevent out-of-range trailing buckets.
 - Missing time intervals are filled with 0 units in memory to guarantee continuous time-series visualization.
 
 ### Deterministic Cursor-Based Pagination
 - Events queries are stably sorted by `usage_events.created_at DESC, usage_events.id DESC`.
 - Opaque pagination cursor encodes `{ createdAt, id }` in Base64URL format.
-- Queries with a cursor apply `(created_at < cursor.createdAt) OR (created_at = cursor.createdAt AND id < cursor.id)`, eliminating duplicate or skipped rows.
+- Queries with a cursor apply `(created_at < cursor.createdAt) OR (created_at = cursor.createdAt AND id < cursor.id)`, eliminating duplicate or skipped rows across identical millisecond timestamps.
+- Cursors are strictly validated for length, Base64URL character set, exact 2-key JSON shape, canonical ISO timestamp, and valid ID format.
 
-### Truthful Quota Architecture
+### Truthful Quota Architecture & Zero-Percentage Rendering
 - Returns an unconfigured quota object (`configured: false`, `allowedMonthlyUnits: null`, `percentUsed: null`).
 - Renders "No quota configured" in UI without fabricating hypothetical quotas or synthetic progress bars.
+- When total units are zero, key breakdowns render `—` without progress bars.
+
+### Near-Real-Time Auto-Refresh Lifecycle
+- The dashboard polls at ~30-second intervals via Next.js server actions / `router.refresh()` only when `document.visibilityState === "visible"`.
+- Event listeners and interval timers are strictly cleaned up on unmount and tab blur to prevent accumulating timers or resource drain.
 
 ---
 

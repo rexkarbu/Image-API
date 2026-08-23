@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Metadata } from "next";
 import { requireOrganizationContext } from "@/lib/tenant/context";
 import { getUsageDashboardData } from "@/lib/services/usage-analytics";
@@ -35,7 +36,7 @@ export default async function UsageDashboardPage({ searchParams }: UsagePageProp
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <div className="flex items-center space-x-2 text-xs font-mono text-neutral-500 mb-1">
-            <span>{organization.name.toUpperCase()}</span>
+            <span className="truncate max-w-[200px] sm:max-w-xs">{organization.name.toUpperCase()}</span>
             <span>•</span>
             <span>USAGE & METERING</span>
           </div>
@@ -43,7 +44,7 @@ export default async function UsageDashboardPage({ searchParams }: UsagePageProp
             Usage & Analytics
           </h1>
           <p className="text-xs text-neutral-600 dark:text-neutral-400 mt-1">
-            Real-time request metrics, time-series visualization, and per-key consumption.
+            Recorded transformation metrics, time-series intervals, and per-key consumption.
           </p>
         </div>
 
@@ -57,10 +58,13 @@ export default async function UsageDashboardPage({ searchParams }: UsagePageProp
       />
 
       {/* 2. Interactive Filter Bar */}
-      <UsageFiltersBar
-        activeFilters={data.activeFilters}
-        filterOptions={data.filterOptions}
-      />
+      <Suspense fallback={<div className="h-20 bg-neutral-100 dark:bg-neutral-800 rounded-lg animate-pulse" />}>
+        <UsageFiltersBar
+          activeFilters={data.activeFilters}
+          filterOptions={data.filterOptions}
+          filterError={data.filterError}
+        />
+      </Suspense>
 
       {/* 3. Time Series Chart */}
       <UsageChart
@@ -77,10 +81,12 @@ export default async function UsageDashboardPage({ searchParams }: UsagePageProp
           />
         </div>
         <div className="lg:col-span-2">
-          <UsageEventsTable
-            eventsPage={data.eventsPage}
-            activeFilters={data.activeFilters}
-          />
+          <Suspense fallback={<div className="h-64 bg-neutral-100 dark:bg-neutral-800 rounded-lg animate-pulse" />}>
+            <UsageEventsTable
+              eventsPage={data.eventsPage}
+              activeFilters={data.activeFilters}
+            />
+          </Suspense>
         </div>
       </div>
     </div>

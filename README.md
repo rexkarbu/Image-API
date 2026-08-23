@@ -124,8 +124,8 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (181 tests).
-- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (22 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite (187 tests).
+- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (23 tests).
 - `pnpm verify:http`: Runs real HTTP E2E verification of `POST /v1/images/transform` against running server.
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.
 - `pnpm db:check`: Checks Drizzle schema snapshot consistency.
@@ -154,11 +154,10 @@ cp .env.example .env.local
 
 ---
 
-## What Is Intentionally Deferred (Out of Scope for M2)
+## What Is Intentionally Deferred (Out of Scope for M3)
 
 The following features are intentionally not implemented yet and are scheduled for subsequent milestones:
 
-- Real-time usage event stream visualization on dashboard (Milestone 3).
 - Rate limiting and Redis/Upstash integrations (Milestone 4).
 - Stripe customer synchronization and metered billing reporting (Milestone 5).
 - Background worker queues and async job dispatch.

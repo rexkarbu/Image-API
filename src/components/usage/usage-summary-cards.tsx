@@ -66,7 +66,7 @@ export function UsageSummaryCards({ summary, rangePreset }: UsageSummaryCardsPro
           </span>
         </div>
         <div className="text-[11px] text-neutral-500 dark:text-neutral-400">
-          Billed transformations this month
+          Recorded usage units this month
         </div>
       </div>
 
