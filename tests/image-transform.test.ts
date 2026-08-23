@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   transformImage,
   SHARP_SECURITY_OPTIONS,
+  SHARP_PROBE_SECURITY_OPTIONS,
   SHARP_TIMEOUT_SECONDS,
 } from "@/lib/services/image-transform";
 import sharp from "sharp";
@@ -131,6 +132,12 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     expect(SHARP_SECURITY_OPTIONS.limitInputChannels).toBe(4);
     expect(SHARP_SECURITY_OPTIONS.pages).toBe(1);
     expect(SHARP_SECURITY_OPTIONS.animated).toBe(false);
+
+    expect(SHARP_PROBE_SECURITY_OPTIONS.failOn).toBe("warning");
+    expect(SHARP_PROBE_SECURITY_OPTIONS.limitInputPixels).toBe(40_000_000);
+    expect(SHARP_PROBE_SECURITY_OPTIONS.limitInputChannels).toBe(4);
+    expect(SHARP_PROBE_SECURITY_OPTIONS.animated).toBe(true);
+
     expect(SHARP_TIMEOUT_SECONDS).toBe(20);
   });
 
@@ -457,11 +464,11 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     expect(outMeta.orientation).toBeUndefined();
   });
 
-  it("probes genuine animated WebP fixture (pages > 1) and rejects with 415 UNSUPPORTED_IMAGE_TYPE", async () => {
+  it("probes genuine animated WebP fixture (pages > 1) with SHARP_PROBE_SECURITY_OPTIONS and rejects with 415 UNSUPPORTED_IMAGE_TYPE", async () => {
     const animatedWebpBuffer = createAnimatedWebpFixture();
 
-    // 1. Probe the genuine fixture with Sharp directly before transformImage
-    const probe = await sharp(animatedWebpBuffer, { animated: true }).metadata();
+    // 1. Probe the genuine fixture with Sharp directly using SHARP_PROBE_SECURITY_OPTIONS before transformImage
+    const probe = await sharp(animatedWebpBuffer, SHARP_PROBE_SECURITY_OPTIONS).metadata();
     expect(probe.format).toBe("webp");
     expect(probe.pages).toBeDefined();
     expect(probe.pages!).toBeGreaterThan(1);

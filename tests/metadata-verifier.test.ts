@@ -5,7 +5,8 @@ import {
   REQUIRED_CHECK_CONSTRAINTS,
 } from "@/db/verify-metadata";
 
-describe("PostgreSQL Metadata Verifier & Fail-Closed Check Constraint Unit Tests", () => {
+describe("PostgreSQL Metadata Verifier & Complete Fail-Closed Check Constraint Unit Tests", () => {
+  // Positive fixtures derived from actual PostgreSQL catalog output
   const validCheckRows = [
     {
       table_name: "usage_events",
@@ -61,7 +62,7 @@ describe("PostgreSQL Metadata Verifier & Fail-Closed Check Constraint Unit Tests
     },
   ];
 
-  it("normalizes PostgreSQL check clause formatting and whitespace", () => {
+  it("normalizes PostgreSQL check clause formatting, casts, and whitespace", () => {
     const raw = "(((status = 'active'::text) AND (revoked_at IS NULL)))";
     const normalized = normalizeCheckClause(raw);
     expect(normalized).toBe("status = 'active' AND revoked_at IS NULL");
@@ -71,6 +72,71 @@ describe("PostgreSQL Metadata Verifier & Fail-Closed Check Constraint Unit Tests
     expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, validCheckRows)).not.toThrow();
   });
 
+  // 1. Appended Tautology & Invariant Weakening Tests
+  it("fails closed when api_keys_expires_at_check is followed by OR TRUE", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_keys_expires_at_check"
+        ? { ...r, check_clause: "((expires_at IS NULL) OR (expires_at > created_at)) OR TRUE" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'api_keys_expires_at_check' failed semantic validation/
+    );
+  });
+
+  it("fails closed when api_keys_status_revoked_consistency is followed by OR TRUE", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_keys_status_revoked_consistency"
+        ? {
+            ...r,
+            check_clause:
+              "(((status = 'active'::text) AND (revoked_at IS NULL)) OR ((status = 'revoked'::text) AND (revoked_at IS NOT NULL))) OR TRUE",
+          }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'api_keys_status_revoked_consistency' failed semantic validation/
+    );
+  });
+
+  it("fails closed when api_keys_status_check is followed by OR TRUE", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_keys_status_check"
+        ? { ...r, check_clause: "(status = ANY (ARRAY['active'::text, 'revoked'::text])) OR TRUE" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'api_keys_status_check' failed semantic validation/
+    );
+  });
+
+  it("fails closed when api_key_audit_events_type_check is followed by OR TRUE", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_key_audit_events_type_check"
+        ? {
+            ...r,
+            check_clause:
+              "(event_type = ANY (ARRAY['created'::text, 'revoked'::text, 'rotation_created'::text, 'expiration_scheduled'::text])) OR TRUE",
+          }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'api_key_audit_events_type_check' failed semantic validation/
+    );
+  });
+
+  it("fails closed when usage_events_status_code_2xx is followed by AND TRUE", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "usage_events_status_code_2xx"
+        ? { ...r, check_clause: "((status_code >= 200) AND (status_code <= 299)) AND TRUE" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'usage_events_status_code_2xx' failed semantic validation/
+    );
+  });
+
+  // 2. Operator & Connector Inversion Tests
   it("fails closed when api_keys_expires_at_check connects branches with AND instead of OR", () => {
     const badRows = validCheckRows.map((r) =>
       r.constraint_name === "api_keys_expires_at_check"
@@ -115,6 +181,7 @@ describe("PostgreSQL Metadata Verifier & Fail-Closed Check Constraint Unit Tests
     );
   });
 
+  // 3. Enum Set Bounds & Extra Values Tests
   it("fails closed when api_keys_status_check contains an extra unexpected enum value ('suspended')", () => {
     const badRows = validCheckRows.map((r) =>
       r.constraint_name === "api_keys_status_check"
@@ -126,7 +193,7 @@ describe("PostgreSQL Metadata Verifier & Fail-Closed Check Constraint Unit Tests
     );
   });
 
-  it("fails closed when api_key_audit_events_type_check contains an extra unexpected enum value", () => {
+  it("fails closed when api_key_audit_events_type_check contains an extra unexpected enum value ('deleted')", () => {
     const badRows = validCheckRows.map((r) =>
       r.constraint_name === "api_key_audit_events_type_check"
         ? {
@@ -152,6 +219,7 @@ describe("PostgreSQL Metadata Verifier & Fail-Closed Check Constraint Unit Tests
     );
   });
 
+  // 4. Column Swapping & Negation Tests
   it("fails closed when a correct regex is applied to the wrong column", () => {
     const badRows = validCheckRows.map((r) =>
       r.constraint_name === "usage_events_request_id_format"

@@ -36,8 +36,7 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "usage_events",
     name: "usage_events_units_equals_one",
     validate: (c) => {
-      // Must match exact column 'units', operator '=', and value '1'
-      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
+      // Must match exact complete expression: units = 1
       return /^\s*units\s*=\s*1\s*$/i.test(c);
     },
     description: "units = 1",
@@ -46,8 +45,7 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "usage_events",
     name: "usage_events_request_id_format",
     validate: (c) => {
-      // Must match exact column 'request_id', regex operator '~', and pattern '^[0-9a-f]{64}$'
-      if (/\bNOT\b/i.test(c) || /!~/i.test(c)) return false;
+      // Must match exact complete expression: request_id ~ '^[0-9a-f]{64}$'
       return /^\s*request_id\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c);
     },
     description: "request_id ~ '^[0-9a-f]{64}$'",
@@ -56,12 +54,10 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "usage_events",
     name: "usage_events_status_code_2xx",
     validate: (c) => {
-      // Must enforce lower bound (>= 200) AND upper bound (<= 299) connected with AND
-      if (/\bNOT\b/i.test(c) || /\bOR\b/i.test(c)) return false;
-      const hasLower = /\bstatus_code\s*>=\s*200\b/i.test(c);
-      const hasUpper = /\bstatus_code\s*<=\s*299\b/i.test(c);
-      const hasAnd = /\bAND\b/i.test(c);
-      return hasLower && hasUpper && hasAnd;
+      // Must match exact complete expression: status_code >= 200 AND status_code <= 299 (or reversed)
+      return /^\s*(?:status_code\s*>=\s*200\s+AND\s+status_code\s*<=\s*299|status_code\s*<=\s*299\s+AND\s+status_code\s*>=\s*200)\s*$/i.test(
+        c
+      );
     },
     description: "status_code >= 200 AND status_code <= 299",
   },
@@ -69,11 +65,15 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_key_audit_events",
     name: "api_key_audit_events_type_check",
     validate: (c) => {
-      // Must match exact column 'event_type' and exact set of 4 enum values (no extra, no missing)
-      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
-      if (!/^\s*event_type\s*(?:=\s*ANY\s*ARRAY|IN\b)/i.test(c)) return false;
-      const expected = ["created", "revoked", "rotation_created", "expiration_scheduled"].sort();
-      const actual = extractQuotedLiterals(c).sort();
+      // Match exact complete expression for event_type enum check
+      const m = c.match(/^\s*event_type\s*(?:=\s*ANY\s*ARRAY\s*\[\s*(.*?)\s*\]|IN\s*\[?\s*(.*?)\s*\]?)\s*$/i);
+      if (!m) return false;
+      const inner = m[1] || m[2] || "";
+      // Ensure inner only contains quoted literals and commas
+      const nonLiteral = inner.replace(/'[^']*'/g, "").replace(/[\s,]/g, "");
+      if (nonLiteral.length > 0) return false;
+      const expected = ["created", "expiration_scheduled", "revoked", "rotation_created"].sort();
+      const actual = extractQuotedLiterals(inner).sort();
       return expected.length === actual.length && expected.every((val, idx) => val === actual[idx]);
     },
     description: "event_type IN ('created', 'revoked', 'rotation_created', 'expiration_scheduled')",
@@ -82,11 +82,14 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_keys",
     name: "api_keys_status_check",
     validate: (c) => {
-      // Must match exact column 'status' and exact set of 2 enum values ('active', 'revoked')
-      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
-      if (!/^\s*status\s*(?:=\s*ANY\s*ARRAY|IN\b)/i.test(c)) return false;
+      // Match exact complete expression for status enum check
+      const m = c.match(/^\s*status\s*(?:=\s*ANY\s*ARRAY\s*\[\s*(.*?)\s*\]|IN\s*\[?\s*(.*?)\s*\]?)\s*$/i);
+      if (!m) return false;
+      const inner = m[1] || m[2] || "";
+      const nonLiteral = inner.replace(/'[^']*'/g, "").replace(/[\s,]/g, "");
+      if (nonLiteral.length > 0) return false;
       const expected = ["active", "revoked"].sort();
-      const actual = extractQuotedLiterals(c).sort();
+      const actual = extractQuotedLiterals(inner).sort();
       return expected.length === actual.length && expected.every((val, idx) => val === actual[idx]);
     },
     description: "status IN ('active', 'revoked')",
@@ -95,8 +98,7 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_keys",
     name: "api_keys_key_hash_format",
     validate: (c) => {
-      // Must match exact column 'key_hash', regex operator '~', and pattern '^[0-9a-f]{64}$'
-      if (/\bNOT\b/i.test(c) || /!~/i.test(c)) return false;
+      // Must match exact complete expression: key_hash ~ '^[0-9a-f]{64}$'
       return /^\s*key_hash\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c);
     },
     description: "key_hash ~ '^[0-9a-f]{64}$'",
@@ -105,8 +107,7 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_keys",
     name: "api_keys_key_prefix_format",
     validate: (c) => {
-      // Must match exact column 'key_prefix', regex operator '~', and pattern '^img_live_[A-Za-z0-9_-]{8}$'
-      if (/\bNOT\b/i.test(c) || /!~/i.test(c)) return false;
+      // Must match exact complete expression: key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'
       return /^\s*key_prefix\s*~\s*'\^img_live_\[A-Za-z0-9_-\]\{8\}\$'\s*$/i.test(c);
     },
     description: "key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'",
@@ -115,11 +116,14 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_keys",
     name: "api_keys_status_revoked_consistency",
     validate: (c) => {
-      // Must require (status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)
-      const hasActiveBranch = /\bstatus\s*=\s*'active'\s*AND\s*revoked_at\s*IS\s*NULL\b/i.test(c);
-      const hasRevokedBranch = /\bstatus\s*=\s*'revoked'\s*AND\s*revoked_at\s*IS\s*NOT\s*NULL\b/i.test(c);
-      const hasOr = /\bOR\b/i.test(c);
-      return hasActiveBranch && hasRevokedBranch && hasOr;
+      // Must match exact complete expression with both active/null and revoked/not null branches
+      const branchActive = `(?:status\\s*=\\s*'active'\\s+AND\\s+revoked_at\\s+IS\\s+NULL|revoked_at\\s+IS\\s+NULL\\s+AND\\s+status\\s*=\\s*'active')`;
+      const branchRevoked = `(?:status\\s*=\\s*'revoked'\\s+AND\\s+revoked_at\\s+IS\\s+NOT\\s+NULL|revoked_at\\s+IS\\s+NOT\\s+NULL\\s+AND\\s+status\\s*=\\s*'revoked')`;
+      const full = new RegExp(
+        `^\\s*(?:${branchActive}\\s+OR\\s+${branchRevoked}|${branchRevoked}\\s+OR\\s+${branchActive})\\s*$`,
+        "i"
+      );
+      return full.test(c);
     },
     description: "(status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)",
   },
@@ -127,8 +131,7 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_keys",
     name: "api_keys_scopes_check",
     validate: (c) => {
-      // Must match exact column 'scopes', operator '=', and value 'image:transform'
-      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
+      // Must match exact complete expression: scopes = 'image:transform'
       return /^\s*scopes\s*=\s*'image:transform'\s*$/i.test(c);
     },
     description: "scopes = 'image:transform'",
@@ -137,15 +140,10 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_keys",
     name: "api_keys_expires_at_check",
     validate: (c) => {
-      // Must contain 'expires_at IS NULL' AND 'expires_at > created_at' connected with 'OR' (never 'AND')
-      if (/\bNOT\b/i.test(c)) return false;
-      const hasNullBranch = /\bexpires_at\s+IS\s+NULL\b/i.test(c);
-      const hasComparisonBranch = /\bexpires_at\s*>\s*created_at\b/i.test(c);
-      const hasOr = /\bOR\b/i.test(c);
-      const isConnectedWithAnd =
-        /\bexpires_at\s+IS\s+NULL\s+AND\s+expires_at\s*>/i.test(c) ||
-        /\bexpires_at\s*>\s*created_at\s+AND\s+expires_at\s+IS\s+NULL\b/i.test(c);
-      return hasNullBranch && hasComparisonBranch && hasOr && !isConnectedWithAnd;
+      // Must match exact complete expression: expires_at IS NULL OR expires_at > created_at (or reversed)
+      return /^\s*(?:expires_at\s+IS\s+NULL\s+OR\s+expires_at\s*>\s*created_at|expires_at\s*>\s*created_at\s+OR\s+expires_at\s+IS\s+NULL)\s*$/i.test(
+        c
+      );
     },
     description: "expires_at IS NULL OR expires_at > created_at",
   },

@@ -21,6 +21,13 @@ export const SHARP_SECURITY_OPTIONS: SharpOptions = {
   animated: false,
 };
 
+export const SHARP_PROBE_SECURITY_OPTIONS: SharpOptions = {
+  failOn: "warning",
+  limitInputPixels: 40_000_000,
+  limitInputChannels: 4,
+  animated: true,
+};
+
 export const SHARP_TIMEOUT_SECONDS = 20;
 const MAX_OUTPUT_SIZE = 20 * 1024 * 1024; // 20 MiB
 const ALLOWED_INPUT_FORMATS = new Set(["jpeg", "png", "webp"]);
@@ -55,7 +62,7 @@ export async function transformImage(
   // 1. Initial metadata inspection & format gating with animated and multi-page detection
   let metadata: Metadata;
   try {
-    const probe = sharp(inputBuffer, { failOn: "warning", animated: true });
+    const probe = sharp(inputBuffer, SHARP_PROBE_SECURITY_OPTIONS);
     metadata = await probe.metadata();
   } catch {
     throw new ApiError(
