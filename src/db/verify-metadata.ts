@@ -12,46 +12,69 @@ export interface CheckConstraintRule {
   description: string;
 }
 
+/**
+ * Normalizes PostgreSQL check clause strings by stripping typecasts (::type),
+ * replacing parentheses with spaces to form clean token boundaries, and collapsing whitespace.
+ */
 export function normalizeCheckClause(clause: string): string {
   return clause
-    .replace(/::text/g, "")
     .replace(/::[a-z0-9_]+/gi, "")
     .replace(/[()]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
+/**
+ * Extracts all single-quoted string literals from a normalized clause.
+ */
+function extractQuotedLiterals(clause: string): string[] {
+  return Array.from(clause.matchAll(/'([^']+)'/g)).map((m) => m[1]);
+}
+
 export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
   {
     table: "usage_events",
     name: "usage_events_units_equals_one",
-    validate: (c) => c.includes("units = 1"),
+    validate: (c) => {
+      // Must match exact column 'units', operator '=', and value '1'
+      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
+      return /^\s*units\s*=\s*1\s*$/i.test(c);
+    },
     description: "units = 1",
   },
   {
     table: "usage_events",
     name: "usage_events_request_id_format",
-    validate: (c) => c.includes("^[0-9a-f]{64}$"),
+    validate: (c) => {
+      // Must match exact column 'request_id', regex operator '~', and pattern '^[0-9a-f]{64}$'
+      if (/\bNOT\b/i.test(c) || /!~/i.test(c)) return false;
+      return /^\s*request_id\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c);
+    },
     description: "request_id ~ '^[0-9a-f]{64}$'",
   },
   {
     table: "usage_events",
     name: "usage_events_status_code_2xx",
-    validate: (c) =>
-      c.includes("status_code >= 200") &&
-      c.includes("status_code <= 299"),
+    validate: (c) => {
+      // Must enforce lower bound (>= 200) AND upper bound (<= 299) connected with AND
+      if (/\bNOT\b/i.test(c) || /\bOR\b/i.test(c)) return false;
+      const hasLower = /\bstatus_code\s*>=\s*200\b/i.test(c);
+      const hasUpper = /\bstatus_code\s*<=\s*299\b/i.test(c);
+      const hasAnd = /\bAND\b/i.test(c);
+      return hasLower && hasUpper && hasAnd;
+    },
     description: "status_code >= 200 AND status_code <= 299",
   },
   {
     table: "api_key_audit_events",
     name: "api_key_audit_events_type_check",
     validate: (c) => {
-      const hasAll =
-        c.includes("'created'") &&
-        c.includes("'revoked'") &&
-        c.includes("'rotation_created'") &&
-        c.includes("'expiration_scheduled'");
-      return hasAll && c.includes("event_type");
+      // Must match exact column 'event_type' and exact set of 4 enum values (no extra, no missing)
+      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
+      if (!/^\s*event_type\s*(?:=\s*ANY\s*ARRAY|IN\b)/i.test(c)) return false;
+      const expected = ["created", "revoked", "rotation_created", "expiration_scheduled"].sort();
+      const actual = extractQuotedLiterals(c).sort();
+      return expected.length === actual.length && expected.every((val, idx) => val === actual[idx]);
     },
     description: "event_type IN ('created', 'revoked', 'rotation_created', 'expiration_scheduled')",
   },
@@ -59,46 +82,72 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
     table: "api_keys",
     name: "api_keys_status_check",
     validate: (c) => {
-      const hasAll = c.includes("'active'") && c.includes("'revoked'");
-      return hasAll && c.includes("status");
+      // Must match exact column 'status' and exact set of 2 enum values ('active', 'revoked')
+      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
+      if (!/^\s*status\s*(?:=\s*ANY\s*ARRAY|IN\b)/i.test(c)) return false;
+      const expected = ["active", "revoked"].sort();
+      const actual = extractQuotedLiterals(c).sort();
+      return expected.length === actual.length && expected.every((val, idx) => val === actual[idx]);
     },
     description: "status IN ('active', 'revoked')",
   },
   {
     table: "api_keys",
     name: "api_keys_key_hash_format",
-    validate: (c) => c.includes("^[0-9a-f]{64}$"),
+    validate: (c) => {
+      // Must match exact column 'key_hash', regex operator '~', and pattern '^[0-9a-f]{64}$'
+      if (/\bNOT\b/i.test(c) || /!~/i.test(c)) return false;
+      return /^\s*key_hash\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c);
+    },
     description: "key_hash ~ '^[0-9a-f]{64}$'",
   },
   {
     table: "api_keys",
     name: "api_keys_key_prefix_format",
-    validate: (c) => c.includes("^img_live_[A-Za-z0-9_-]{8}$"),
+    validate: (c) => {
+      // Must match exact column 'key_prefix', regex operator '~', and pattern '^img_live_[A-Za-z0-9_-]{8}$'
+      if (/\bNOT\b/i.test(c) || /!~/i.test(c)) return false;
+      return /^\s*key_prefix\s*~\s*'\^img_live_\[A-Za-z0-9_-\]\{8\}\$'\s*$/i.test(c);
+    },
     description: "key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'",
   },
   {
     table: "api_keys",
     name: "api_keys_status_revoked_consistency",
-    validate: (c) =>
-      c.includes("status = 'active'") &&
-      c.includes("revoked_at IS NULL") &&
-      c.includes("status = 'revoked'") &&
-      c.includes("revoked_at IS NOT NULL"),
+    validate: (c) => {
+      // Must require (status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)
+      const hasActiveBranch = /\bstatus\s*=\s*'active'\s*AND\s*revoked_at\s*IS\s*NULL\b/i.test(c);
+      const hasRevokedBranch = /\bstatus\s*=\s*'revoked'\s*AND\s*revoked_at\s*IS\s*NOT\s*NULL\b/i.test(c);
+      const hasOr = /\bOR\b/i.test(c);
+      return hasActiveBranch && hasRevokedBranch && hasOr;
+    },
     description: "(status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)",
   },
   {
     table: "api_keys",
     name: "api_keys_scopes_check",
-    validate: (c) => c.includes("image:transform"),
+    validate: (c) => {
+      // Must match exact column 'scopes', operator '=', and value 'image:transform'
+      if (/\bNOT\b/i.test(c) || /!=|<>/i.test(c)) return false;
+      return /^\s*scopes\s*=\s*'image:transform'\s*$/i.test(c);
+    },
     description: "scopes = 'image:transform'",
   },
   {
     table: "api_keys",
     name: "api_keys_expires_at_check",
-    validate: (c) =>
-      c.includes("expires_at IS NULL") &&
-      c.includes("expires_at > created_at"),
-    description: "expires_at IS NULL OR expires_at > created_at (both invariants required)",
+    validate: (c) => {
+      // Must contain 'expires_at IS NULL' AND 'expires_at > created_at' connected with 'OR' (never 'AND')
+      if (/\bNOT\b/i.test(c)) return false;
+      const hasNullBranch = /\bexpires_at\s+IS\s+NULL\b/i.test(c);
+      const hasComparisonBranch = /\bexpires_at\s*>\s*created_at\b/i.test(c);
+      const hasOr = /\bOR\b/i.test(c);
+      const isConnectedWithAnd =
+        /\bexpires_at\s+IS\s+NULL\s+AND\s+expires_at\s*>/i.test(c) ||
+        /\bexpires_at\s*>\s*created_at\s+AND\s+expires_at\s+IS\s+NULL\b/i.test(c);
+      return hasNullBranch && hasComparisonBranch && hasOr && !isConnectedWithAnd;
+    },
+    description: "expires_at IS NULL OR expires_at > created_at",
   },
 ];
 

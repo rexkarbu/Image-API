@@ -486,9 +486,9 @@ async function runHttpE2E() {
     console.log("\n==================================================");
     console.log("🎉 ALL REAL HTTP TRANSFORMATION & METERING CHECKS PASSED!");
     console.log("==================================================");
-  } catch (err: any) {
+  } catch {
     runError = new Error("HTTP E2E Verification failed during test execution.");
-    console.error(`❌ HTTP E2E Verification Failed: operation=runHttpE2E runId=${testId} reason=${err?.message || "unknown"}`);
+    console.error(`❌ HTTP E2E Verification Failed: operation=runHttpE2E runId=${testId}`);
     process.exitCode = 1;
   } finally {
     console.log("\n🧹 Cleaning up test fixtures...");
@@ -522,4 +522,6 @@ async function runHttpE2E() {
   }
 }
 
-runHttpE2E();
+runHttpE2E().catch(() => {
+  process.exitCode = 1;
+});

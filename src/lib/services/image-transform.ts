@@ -52,10 +52,10 @@ export async function transformImage(
     );
   }
 
-  // 1. Initial metadata inspection & format gating with shared security options
+  // 1. Initial metadata inspection & format gating with animated and multi-page detection
   let metadata: Metadata;
   try {
-    const probe = sharp(inputBuffer, SHARP_SECURITY_OPTIONS);
+    const probe = sharp(inputBuffer, { failOn: "warning", animated: true });
     metadata = await probe.metadata();
   } catch {
     throw new ApiError(

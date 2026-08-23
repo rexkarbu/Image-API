@@ -6,6 +6,83 @@ import {
 } from "@/lib/services/image-transform";
 import sharp from "sharp";
 
+/**
+ * Constructs a genuine, authentic binary WebP image containing 2 animation frames (pages = 2).
+ */
+function createAnimatedWebpFixture(): Buffer {
+  const vp8Payload = Buffer.from([
+    0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x02, 0x00, 0x02, 0x00,
+    0x02, 0x00, 0x34, 0x25, 0xa4, 0x00, 0x03, 0x70, 0x00, 0xfe,
+    0xfb, 0xfd, 0x50, 0x00,
+  ]);
+
+  // Frame 1: ANMF chunk
+  const anmf1Header = Buffer.from([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x64, 0x00, 0x00, 0x02,
+  ]);
+  const vp8Chunk1 = Buffer.concat([
+    Buffer.from("VP8 "),
+    Buffer.from([(vp8Payload.length) & 0xff, (vp8Payload.length >> 8) & 0xff, 0x00, 0x00]),
+    vp8Payload,
+  ]);
+  const anmf1Payload = Buffer.concat([anmf1Header, vp8Chunk1]);
+  const anmf1Chunk = Buffer.concat([
+    Buffer.from("ANMF"),
+    Buffer.from([(anmf1Payload.length) & 0xff, (anmf1Payload.length >> 8) & 0xff, 0x00, 0x00]),
+    anmf1Payload,
+  ]);
+
+  // Frame 2: ANMF chunk
+  const anmf2Header = Buffer.from([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x64, 0x00, 0x00, 0x02,
+  ]);
+  const vp8Chunk2 = Buffer.concat([
+    Buffer.from("VP8 "),
+    Buffer.from([(vp8Payload.length) & 0xff, (vp8Payload.length >> 8) & 0xff, 0x00, 0x00]),
+    vp8Payload,
+  ]);
+  const anmf2Payload = Buffer.concat([anmf2Header, vp8Chunk2]);
+  const anmf2Chunk = Buffer.concat([
+    Buffer.from("ANMF"),
+    Buffer.from([(anmf2Payload.length) & 0xff, (anmf2Payload.length >> 8) & 0xff, 0x00, 0x00]),
+    anmf2Payload,
+  ]);
+
+  // VP8X Chunk (Extended WebP header with Animation flag: 0x02)
+  const vp8xPayload = Buffer.from([
+    0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+  ]);
+  const vp8xChunk = Buffer.concat([
+    Buffer.from("VP8X"),
+    Buffer.from([0x0a, 0x00, 0x00, 0x00]),
+    vp8xPayload,
+  ]);
+
+  // ANIM Chunk
+  const animPayload = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  const animChunk = Buffer.concat([
+    Buffer.from("ANIM"),
+    Buffer.from([0x06, 0x00, 0x00, 0x00]),
+    animPayload,
+  ]);
+
+  const riffBody = Buffer.concat([
+    Buffer.from("WEBP"),
+    vp8xChunk,
+    animChunk,
+    anmf1Chunk,
+    anmf2Chunk,
+  ]);
+
+  return Buffer.concat([
+    Buffer.from("RIFF"),
+    Buffer.from([(riffBody.length) & 0xff, (riffBody.length >> 8) & 0xff, (riffBody.length >> 16) & 0xff, (riffBody.length >> 24) & 0xff]),
+    riffBody,
+  ]);
+}
+
 describe("Sharp Image Transformation Service Unit Tests", () => {
   const reqId = "req-transform-test";
 
@@ -146,7 +223,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
   });
 
   it("correctly implements fit modes: cover, contain, inside, fill", async () => {
-    // Input is 200x100 (aspect 2:1)
     const input = await generateTestPng(200, 100, false);
 
     // 1. fit: cover into 80x80 -> exact 80x80 crop
@@ -217,7 +293,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
   });
 
   it("flattens transparent PNG images onto solid white background when converting to JPEG", async () => {
-    // 10x10 fully transparent PNG
     const transparentInput = await sharp({
       create: { width: 10, height: 10, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
     })
@@ -235,7 +310,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     expect(outMeta.channels).toBe(3);
     expect(outMeta.hasAlpha).toBe(false);
 
-    // Verify actual pixel RGB values are [255, 255, 255] (solid white)
     const { data } = await sharp(Buffer.from(result.buffer)).raw().toBuffer({ resolveWithObject: true });
     expect(data[0]).toBe(255);
     expect(data[1]).toBe(255);
@@ -243,7 +317,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
   });
 
   it("strips verified EXIF metadata from EXIF-bearing input", async () => {
-    // Generate image with confirmed EXIF tags
     const inputWithExif = await sharp({
       create: { width: 50, height: 50, channels: 3, background: { r: 10, g: 20, b: 30 } },
     })
@@ -258,7 +331,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
       .jpeg()
       .toBuffer();
 
-    // Verify input actually contains EXIF
     const inMeta = await sharp(inputWithExif).metadata();
     expect(inMeta.exif).toBeDefined();
     expect(inMeta.exif?.length).toBeGreaterThan(0);
@@ -276,7 +348,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
   });
 
   it("strips verified real XMP metadata from an XMP-bearing JPEG input fixture", async () => {
-    // Create authentic JPEG containing XMP APP1 packet
     const xmpHeader = Buffer.from("http://ns.adobe.com/xap/1.0/\0", "utf8");
     const xmpXml = Buffer.from(
       `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title><rdf:Alt><rdf:li xml:lang="x-default">VerifiedXMPPacket</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta>`,
@@ -292,7 +363,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     const plainJpeg = await generateTestJpeg(50, 50);
     const jpegWithXmp = Buffer.concat([plainJpeg.subarray(0, 2), app1Xmp, plainJpeg.subarray(2)]);
 
-    // Verify input actually contains XMP before transformation
     const inMeta = await sharp(jpegWithXmp).metadata();
     expect(inMeta.xmp).toBeDefined();
     expect(inMeta.xmp?.length).toBeGreaterThan(0);
@@ -303,21 +373,19 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
       reqId
     );
 
-    // Verify output has zero XMP metadata
     const outMeta = await sharp(Buffer.from(result.buffer)).metadata();
     expect(outMeta.xmp).toBeUndefined();
   });
 
   it("strips verified real GPS-bearing EXIF from a GPS-bearing JPEG input fixture", async () => {
-    // Standard EXIF payload with Tag 0x8825 (GPSInfo) pointing to GPS IFD
     const gpsExifPayload = Buffer.from([
-      0x45, 0x78, 0x69, 0x66, 0x00, 0x00, // 'Exif\0\0'
-      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // TIFF header (II*, offset 8)
-      0x01, 0x00, // 1 IFD0 tag
-      0x25, 0x88, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, // Tag 0x8825 (GPSInfo), Type LONG, Offset 26
-      0x00, 0x00, 0x00, 0x00, // Next IFD offset
-      0x01, 0x00, // GPS IFD: 1 tag
-      0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00, // GPSVersionID: 2.2.0.0
+      0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
+      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
+      0x01, 0x00,
+      0x25, 0x88, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00,
+      0x01, 0x00,
+      0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00,
     ]);
     const gpsLength = gpsExifPayload.length + 2;
@@ -329,7 +397,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     const plainJpeg = await generateTestJpeg(50, 50);
     const jpegWithGps = Buffer.concat([plainJpeg.subarray(0, 2), gpsApp1, plainJpeg.subarray(2)]);
 
-    // Verify input actually contains EXIF/GPS bytes before transformation
     const inMeta = await sharp(jpegWithGps).metadata();
     expect(inMeta.exif).toBeDefined();
     expect(inMeta.exif?.length).toBeGreaterThan(0);
@@ -340,18 +407,16 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
       reqId
     );
 
-    // Verify output has zero EXIF/GPS metadata
     const outMeta = await sharp(Buffer.from(result.buffer)).metadata();
     expect(outMeta.exif).toBeUndefined();
   });
 
   it("auto-orients image based on EXIF orientation before stripping metadata", async () => {
-    // Standard EXIF payload with Tag 0x0112 (Orientation), Value 6 (90 degrees CW rotation)
     const exifPayload = Buffer.from([
-      0x45, 0x78, 0x69, 0x66, 0x00, 0x00, // 'Exif\0\0'
-      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // TIFF header (II*, offset 8)
-      0x01, 0x00, // 1 IFD0 tag
-      0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, // Tag 0x0112 (Orientation), Type SHORT, Count 1, Value 6
+      0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
+      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
+      0x01, 0x00,
+      0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00,
     ]);
 
@@ -367,7 +432,6 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
       .jpeg()
       .toBuffer();
 
-    // Insert APP1 directly after JPEG SOI marker (0xFF, 0xD8)
     const orientedInput = Buffer.concat([
       plainJpeg.subarray(0, 2),
       app1,
@@ -386,12 +450,38 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
       reqId
     );
 
-    // Output should have swapped dimensions (50x100) due to auto-rotation
     const outMeta = await sharp(Buffer.from(result.buffer)).metadata();
     expect(outMeta.width).toBe(50);
     expect(outMeta.height).toBe(100);
     expect(outMeta.exif).toBeUndefined();
     expect(outMeta.orientation).toBeUndefined();
+  });
+
+  it("probes genuine animated WebP fixture (pages > 1) and rejects with 415 UNSUPPORTED_IMAGE_TYPE", async () => {
+    const animatedWebpBuffer = createAnimatedWebpFixture();
+
+    // 1. Probe the genuine fixture with Sharp directly before transformImage
+    const probe = await sharp(animatedWebpBuffer, { animated: true }).metadata();
+    expect(probe.format).toBe("webp");
+    expect(probe.pages).toBeDefined();
+    expect(probe.pages!).toBeGreaterThan(1);
+    expect(probe.pages).toBe(2);
+
+    // 2. Invoke transformImage and verify rejection contract
+    try {
+      await transformImage(
+        animatedWebpBuffer,
+        { format: "png", quality: 80, fit: "inside", withoutEnlargement: true },
+        reqId
+      );
+      expect.fail("Should have rejected animated WebP fixture");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(415);
+      expect(err.code).toBe("UNSUPPORTED_IMAGE_TYPE");
+      expect(err.message).toBe("Animated or multi-page images are not supported.");
+      expect(err.message).not.toContain("vips");
+      expect(err.message).not.toContain("libvips");
+    }
   });
 
   it("rejects PDF input documents with 415 UNSUPPORTED_IMAGE_TYPE", async () => {
@@ -452,7 +542,7 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
       expect(err.code).toBe("UNSUPPORTED_IMAGE_TYPE");
     }
 
-    // AVIF as input (only allowed as output format)
+    // AVIF as input
     const avifBuffer = await sharp({
       create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 2, b: 3 } },
     })

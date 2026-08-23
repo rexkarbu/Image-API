@@ -1,6 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { parseMultipartRequest } from "@/lib/api/multipart";
-import { ApiError } from "@/lib/api/errors";
 import sharp from "sharp";
 
 async function createDummyImage(): Promise<Buffer> {
@@ -135,24 +134,46 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(400);
       expect(err.code).toBe("INVALID_MULTIPART");
-      expect(["Exceeded maximum number of multipart parts.", "Exceeded maximum number of multipart fields."]).toContain(err.message);
+      expect([
+        "Exceeded maximum number of multipart parts.",
+        "Exceeded maximum number of multipart fields.",
+      ]).toContain(err.message);
     }
   });
 
-  it("removes abort listener from request signal after successful parse", async () => {
+  it("deterministically removes the exact registered abort listener reference on success settlement", async () => {
     const controller = new AbortController();
     const dummy = await createDummyImage();
     const req = buildMultipartRequest({}, dummy, "test.png", "file", controller.signal);
 
+    const addSpy = vi.spyOn(req.signal, "addEventListener");
+    const removeSpy = vi.spyOn(req.signal, "removeEventListener");
+
     await parseMultipartRequest(req, reqId);
 
-    // If abort fires after completion, nothing should throw or handle
-    expect(() => controller.abort()).not.toThrow();
+    // Verify addEventListener was called with 'abort'
+    const abortCalls = addSpy.mock.calls.filter((call) => call[0] === "abort");
+    expect(abortCalls.length).toBeGreaterThan(0);
+    const registeredHandler = abortCalls[abortCalls.length - 1][1] as EventListener;
+    expect(typeof registeredHandler).toBe("function");
+
+    // Verify removeEventListener was called with the exact same handler reference exactly once
+    expect(removeSpy).toHaveBeenCalledWith("abort", registeredHandler);
+    expect(removeSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("removes abort listener from request signal after parser failure", async () => {
+  it("deterministically removes the exact registered abort listener reference on failure settlement", async () => {
     const controller = new AbortController();
-    const req = buildMultipartRequest({ width: "not-a-number" }, undefined, "test.png", "file", controller.signal);
+    const req = buildMultipartRequest(
+      { width: "not-a-number" },
+      undefined,
+      "test.png",
+      "file",
+      controller.signal
+    );
+
+    const addSpy = vi.spyOn(req.signal, "addEventListener");
+    const removeSpy = vi.spyOn(req.signal, "removeEventListener");
 
     try {
       await parseMultipartRequest(req, reqId);
@@ -161,19 +182,24 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
       expect(err.statusCode).toBe(400);
     }
 
-    // If abort fires after failure, no secondary rejection occurs
-    expect(() => controller.abort()).not.toThrow();
+    // Verify addEventListener was called with 'abort'
+    const abortCalls = addSpy.mock.calls.filter((call) => call[0] === "abort");
+    expect(abortCalls.length).toBeGreaterThan(0);
+    const registeredHandler = abortCalls[abortCalls.length - 1][1] as EventListener;
+    expect(typeof registeredHandler).toBe("function");
+
+    // Verify removeEventListener was called with the exact same handler reference exactly once
+    expect(removeSpy).toHaveBeenCalledWith("abort", registeredHandler);
+    expect(removeSpy).toHaveBeenCalledTimes(1);
   });
 
   it("handles request abort occurring after parsing has started", async () => {
     const controller = new AbortController();
     const boundary = "---------------------------974767299852498929531610575";
 
-    // Streaming body that aborts while streaming chunks
     const stream = new ReadableStream({
       start(ctrl) {
         ctrl.enqueue(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="width"\r\n\r\n200\r\n`));
-        // Trigger abort mid-stream
         setTimeout(() => {
           controller.abort();
         }, 10);
@@ -205,7 +231,6 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
   it("handles source ReadableStream error after parsing begins cleanly without unhandled stream error", async () => {
     const boundary = "---------------------------974767299852498929531610575";
 
-    // Stream that errors after first chunk
     const errorStream = new ReadableStream({
       start(ctrl) {
         ctrl.enqueue(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="width"\r\n\r\n200\r\n`));
