@@ -7,18 +7,17 @@ dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
 
 async function runMigrations() {
-  const connectionString =
-    process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
+  const directConnectionString = process.env.DIRECT_DATABASE_URL;
 
-  if (!connectionString) {
+  if (!directConnectionString || directConnectionString.trim() === "") {
     console.error(
-      "❌ Migration failed: Neither DIRECT_DATABASE_URL nor DATABASE_URL is defined."
+      "❌ Migration execution failed: DIRECT_DATABASE_URL is required for database migrations. Falling back to pooled DATABASE_URL is not permitted."
     );
     process.exit(1);
   }
 
   const migrationPool = new Pool({
-    connectionString,
+    connectionString: directConnectionString,
     max: 1,
   });
 

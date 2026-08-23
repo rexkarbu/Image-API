@@ -4,6 +4,7 @@
   - **M0.0**: Next.js App Router scaffolding, strict TypeScript, Zod environment validation, PostgreSQL Drizzle schema, Better Auth email/password authentication, organization onboarding, and foundational unit test suite.
   - **M0.1**: Upgraded framework to Next.js 16.3.2, ESLint Flat Config, patched Drizzle ORM security release, and enforced intentional foreign-key delete actions (`CASCADE` / `RESTRICT` / `SET NULL`).
   - **M0.2**: Live PostgreSQL integration with Neon (pooled runtime + direct migration connections), Better Auth session/auth lifecycle verified E2E, and guarded live integration test suite.
+  - **M0.3**: Exact development database endpoint pinning, centralized fail-closed development-safety guard, strict direct-only migration runner, and assertion-based schema metadata verification.
 
 - [ ] **Milestone 1: Secure API-Key Lifecycle**
   - Cryptographic API key generation with SHA-256 hashing.

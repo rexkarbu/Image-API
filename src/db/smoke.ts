@@ -49,9 +49,9 @@ async function smokeTest() {
 
     const missingTables = EXPECTED_TABLES.filter((t) => !existingTables.includes(t));
     if (missingTables.length > 0) {
-      console.warn(`⚠️ Note: Missing expected tables: [${missingTables.join(", ")}]. Migrations may need to be applied.`);
+      throw new Error(`Smoke Test Invariant Failed: Missing required application tables in schema: [${missingTables.join(", ")}].`);
     } else {
-      console.log("✅ All 8 expected application tables verified in database schema.");
+      console.log(`✅ All ${EXPECTED_TABLES.length} expected application tables verified in database schema.`);
     }
   } catch (error) {
     console.error("❌ Database smoke test failed:", (error as Error).message || error);

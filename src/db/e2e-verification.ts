@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import * as dotenv from "dotenv";
 import crypto from "node:crypto";
+import { assertDevelopmentDatabaseSafety } from "./development-safety";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
@@ -30,6 +31,9 @@ function getCookieHeader(jar: CookieJar): string {
 }
 
 async function runE2E() {
+  // Step 0: Enforce strict centralized development database safety guard
+  assertDevelopmentDatabaseSafety();
+
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     max: 1,
@@ -46,7 +50,7 @@ async function runE2E() {
   let createdOrgId: string | null = null;
 
   console.log("==================================================");
-  console.log("🚀 Starting M0.2 Authentication & Onboarding E2E");
+  console.log("🚀 Starting M0.3 Fail-Closed Authentication & Onboarding E2E");
   console.log("==================================================");
 
   try {
@@ -54,7 +58,7 @@ async function runE2E() {
     console.log("\n[Step 1] Fetching GET /sign-up...");
     const signUpPageRes = await fetch(`${BASE_URL}/sign-up`);
     if (signUpPageRes.status !== 200) {
-      throw new Error(`GET /sign-up failed with status ${signUpPageRes.status}`);
+      throw new Error(`GET /sign-up failed with unexpected status ${signUpPageRes.status}`);
     }
     console.log("✅ Step 1 OK: /sign-up returned HTTP 200");
 
@@ -76,31 +80,29 @@ async function runE2E() {
     parseCookies(registerRes, jar);
     const registerBody = await registerRes.json();
 
-    if (!registerRes.ok) {
-      throw new Error(`Registration failed (${registerRes.status}): ${JSON.stringify(registerBody)}`);
+    if (!registerRes.ok || !registerBody.user?.id) {
+      throw new Error(`Registration failed with status ${registerRes.status}: ${JSON.stringify(registerBody)}`);
     }
 
-    createdUserId = registerBody.user?.id;
+    createdUserId = registerBody.user.id;
     console.log(`✅ Step 2 OK: Account created via Better Auth (User ID: ${createdUserId})`);
 
     // Step 3 & 4: Confirm user in database and session cookie issued
     console.log("\n[Step 3 & 4] Verifying database user record and session cookie...");
-    if (!jar["better-auth.session_token"] && !jar["better-auth_session"]) {
-      // Check any session cookie in jar
-      const cookieKeys = Object.keys(jar);
-      if (cookieKeys.length === 0) {
-        throw new Error("No session cookies were issued by Better Auth");
-      }
+    const sessionToken = jar["better-auth.session_token"] || jar["better-auth_session"];
+    if (!sessionToken) {
+      throw new Error("No session cookie was issued by Better Auth upon registration.");
     }
-    console.log(`✅ Session cookie issued: [${Object.keys(jar).join(", ")}]`);
+    console.log("✅ Session cookie issued by Better Auth.");
 
-    const userDbRes = await pool.query("SELECT id, name, email, email_verified FROM \"user\" WHERE id = $1;", [
-      createdUserId,
-    ]);
-    if (userDbRes.rows.length !== 1) {
-      throw new Error("User record was not found in PostgreSQL database");
+    const userDbRes = await pool.query<{ id: string; email: string }>(
+      'SELECT id, email FROM "user" WHERE id = $1;',
+      [createdUserId]
+    );
+    if (userDbRes.rows.length !== 1 || userDbRes.rows[0].id !== createdUserId) {
+      throw new Error("User record was not found in PostgreSQL database.");
     }
-    console.log("✅ Step 3 & 4 OK: User record verified in PostgreSQL database");
+    console.log("✅ Step 3 & 4 OK: User record verified in PostgreSQL database.");
 
     // Step 5: Verify authenticated user without org is routed to onboarding
     console.log("\n[Step 5] Checking GET /dashboard for user without organization...");
@@ -108,38 +110,38 @@ async function runE2E() {
       headers: { Cookie: getCookieHeader(jar) },
       redirect: "manual",
     });
-    console.log(`Dashboard pre-onboarding response: HTTP ${dashboardPreRes.status}`);
-    const location = dashboardPreRes.headers.get("location");
-    if (dashboardPreRes.status === 307 && location?.includes("/onboarding")) {
-      console.log("✅ Step 5 OK: Un-onboarded user redirected to /onboarding (HTTP 307)");
-    } else if (dashboardPreRes.status === 200) {
-      console.log("ℹ️ Dashboard loaded (or rendered onboarding prompt)");
+    const locationPre = dashboardPreRes.headers.get("location");
+    if (dashboardPreRes.status !== 307 || !locationPre?.includes("/onboarding")) {
+      throw new Error(
+        `Expected HTTP 307 redirect to /onboarding for un-onboarded user, got HTTP ${dashboardPreRes.status} (location: ${locationPre})`
+      );
     }
+    console.log("✅ Step 5 OK: Un-onboarded user redirected to /onboarding (HTTP 307).");
 
     // Step 6, 7, 8, 9: Complete onboarding via Server Action
     console.log("\n[Step 6, 7, 8, 9] Completing Onboarding (creating organization + owner membership)...");
-
-    // We execute the onboarding action through Next.js server action request or direct lib helper invocation
     const { createOrganizationWithMembership } = await import("../lib/tenant/organizations");
-    const orgContext = await createOrganizationWithMembership(createdUserId!, orgName);
+    const orgContext = await createOrganizationWithMembership(createdUserId, orgName);
     createdOrgId = orgContext.organization.id;
 
-    console.log(`✅ Organization created: ID ${createdOrgId}, Name "${orgContext.organization.name}"`);
-    console.log(`✅ Owner membership created: Role "${orgContext.membership.role}"`);
+    if (!createdOrgId || orgContext.membership.role !== "owner") {
+      throw new Error("Failed to create organization with owner role.");
+    }
 
     // Verify atomic creation in PostgreSQL
-    const orgCheck = await pool.query("SELECT * FROM organizations WHERE id = $1;", [createdOrgId]);
-    const memberCheck = await pool.query("SELECT * FROM organization_members WHERE organization_id = $1;", [
-      createdOrgId,
-    ]);
+    const orgCheck = await pool.query('SELECT id, name FROM organizations WHERE id = $1;', [createdOrgId]);
+    const memberCheck = await pool.query(
+      'SELECT organization_id, user_id, role FROM organization_members WHERE organization_id = $1;',
+      [createdOrgId]
+    );
 
     if (orgCheck.rows.length !== 1 || memberCheck.rows.length !== 1) {
       throw new Error("Organization and membership atomic creation check failed in PostgreSQL.");
     }
     if (memberCheck.rows[0].user_id !== createdUserId || memberCheck.rows[0].role !== "owner") {
-      throw new Error("Membership role or user mismatch.");
+      throw new Error("Membership user or role mismatch in database.");
     }
-    console.log("✅ Step 6-9 OK: Exactly 1 organization and 1 owner membership verified in PostgreSQL");
+    console.log("✅ Step 6-9 OK: Exactly 1 organization and 1 owner membership verified in PostgreSQL.");
 
     // Step 10 & 11: Access /dashboard as onboarded user
     console.log("\n[Step 10 & 11] Accessing GET /dashboard as onboarded user...");
@@ -149,11 +151,7 @@ async function runE2E() {
     if (dashboardPostRes.status !== 200) {
       throw new Error(`GET /dashboard failed with status ${dashboardPostRes.status}`);
     }
-    const dashboardHtml = await dashboardPostRes.text();
-    if (!dashboardHtml.includes(orgName) && !dashboardHtml.includes("Dashboard")) {
-      console.warn("⚠️ Warning: Dashboard HTML did not contain organization name in static stream");
-    }
-    console.log("✅ Step 10 & 11 OK: GET /dashboard returned HTTP 200 for authenticated onboarded user");
+    console.log("✅ Step 10 & 11 OK: GET /dashboard returned HTTP 200 for authenticated onboarded user.");
 
     // Step 12 & 13: Navigate manually to /onboarding again (repeated onboarding prevention)
     console.log("\n[Step 12 & 13] Testing repeated onboarding navigation to GET /onboarding...");
@@ -161,13 +159,13 @@ async function runE2E() {
       headers: { Cookie: getCookieHeader(jar) },
       redirect: "manual",
     });
-    console.log(`GET /onboarding response for existing member: HTTP ${onboardingRepeatRes.status}`);
     const repeatLocation = onboardingRepeatRes.headers.get("location");
-    if (onboardingRepeatRes.status === 307 && repeatLocation?.includes("/dashboard")) {
-      console.log("✅ Step 12 & 13 OK: Existing member redirected away from /onboarding to /dashboard (HTTP 307)");
-    } else {
-      console.log("✅ Step 12 & 13 OK: Onboarding guard verified");
+    if (onboardingRepeatRes.status !== 307 || !repeatLocation?.includes("/dashboard")) {
+      throw new Error(
+        `Expected HTTP 307 redirect to /dashboard for existing member, got HTTP ${onboardingRepeatRes.status} (location: ${repeatLocation})`
+      );
     }
+    console.log("✅ Step 12 & 13 OK: Existing member redirected away from /onboarding to /dashboard (HTTP 307).");
 
     // Step 14 & 15: Sign out and verify /dashboard redirects
     console.log("\n[Step 14 & 15] Signing out...");
@@ -181,17 +179,21 @@ async function runE2E() {
       body: JSON.stringify({}),
     });
     parseCookies(signOutRes, jar);
-    console.log(`Sign-out response: HTTP ${signOutRes.status}`);
+    if (!signOutRes.ok) {
+      throw new Error(`Sign out failed with status ${signOutRes.status}`);
+    }
 
     const dashboardSignedOutRes = await fetch(`${BASE_URL}/dashboard`, {
       headers: { Cookie: getCookieHeader(jar) },
       redirect: "manual",
     });
-    if (dashboardSignedOutRes.status === 307) {
-      console.log("✅ Step 14 & 15 OK: /dashboard redirected to /sign-in after sign-out (HTTP 307)");
-    } else {
-      console.log(`ℹ️ /dashboard after sign-out status: HTTP ${dashboardSignedOutRes.status}`);
+    const signedOutLocation = dashboardSignedOutRes.headers.get("location");
+    if (dashboardSignedOutRes.status !== 307 || !signedOutLocation?.includes("/sign-in")) {
+      throw new Error(
+        `Expected HTTP 307 redirect to /sign-in after sign out, got HTTP ${dashboardSignedOutRes.status} (location: ${signedOutLocation})`
+      );
     }
+    console.log("✅ Step 14 & 15 OK: /dashboard redirected to /sign-in after sign-out (HTTP 307).");
 
     // Step 16: Test invalid sign-in
     console.log("\n[Step 16] Testing invalid sign-in...");
@@ -206,11 +208,10 @@ async function runE2E() {
         password: "WrongPassword!999",
       }),
     });
-    const invalidBody = await invalidSignInRes.json();
-    console.log(`Invalid sign-in status: HTTP ${invalidSignInRes.status}`);
-    if (invalidSignInRes.status === 400 || invalidSignInRes.status === 401) {
-      console.log("✅ Step 16 OK: Invalid credentials rejected without leaking sensitive information");
+    if (invalidSignInRes.status !== 401 && invalidSignInRes.status !== 400) {
+      throw new Error(`Expected HTTP 400/401 for invalid credentials, got HTTP ${invalidSignInRes.status}`);
     }
+    console.log("✅ Step 16 OK: Invalid credentials rejected without leaking sensitive information (HTTP 401).");
 
     // Step 17: Valid sign-in again and access dashboard
     console.log("\n[Step 17] Signing back in with valid credentials...");
@@ -227,40 +228,34 @@ async function runE2E() {
     });
     parseCookies(validSignInRes, jar);
     if (!validSignInRes.ok) {
-      throw new Error(`Valid sign-in failed (${validSignInRes.status})`);
+      throw new Error(`Valid sign-in failed with status ${validSignInRes.status}`);
     }
-    console.log("✅ Step 17 OK: Successfully re-authenticated with valid credentials");
 
     const reDashboardRes = await fetch(`${BASE_URL}/dashboard`, {
       headers: { Cookie: getCookieHeader(jar) },
     });
-    if (reDashboardRes.status === 200) {
-      console.log("✅ Step 17 OK: /dashboard accessed successfully after re-authentication (HTTP 200)");
+    if (reDashboardRes.status !== 200) {
+      throw new Error(`GET /dashboard after re-authentication failed with status ${reDashboardRes.status}`);
     }
+    console.log("✅ Step 17 OK: Successfully re-authenticated with valid credentials and accessed /dashboard (HTTP 200).");
 
     // Section 6: Database State Audit
     console.log("\n==================================================");
-    console.log("🔍 Section 6: PostgreSQL Database Verification Post-E2E");
+    console.log("🔍 Database Verification Post-E2E");
     console.log("==================================================");
 
-    const userCount = await pool.query("SELECT COUNT(*) AS count FROM \"user\" WHERE id = $1;", [createdUserId]);
-    const orgCount = await pool.query("SELECT COUNT(*) AS count FROM organizations WHERE id = $1;", [createdOrgId]);
+    const userCount = await pool.query('SELECT COUNT(*) AS count FROM "user" WHERE id = $1;', [createdUserId]);
+    const orgCount = await pool.query('SELECT COUNT(*) AS count FROM organizations WHERE id = $1;', [createdOrgId]);
     const memberCount = await pool.query(
-      "SELECT COUNT(*) AS count FROM organization_members WHERE organization_id = $1;",
+      'SELECT COUNT(*) AS count FROM organization_members WHERE organization_id = $1;',
       [createdOrgId]
     );
-    const keyCount = await pool.query("SELECT COUNT(*) AS count FROM api_keys WHERE organization_id = $1;", [
+    const keyCount = await pool.query('SELECT COUNT(*) AS count FROM api_keys WHERE organization_id = $1;', [
       createdOrgId,
     ]);
-    const usageCount = await pool.query("SELECT COUNT(*) AS count FROM usage_events WHERE organization_id = $1;", [
+    const usageCount = await pool.query('SELECT COUNT(*) AS count FROM usage_events WHERE organization_id = $1;', [
       createdOrgId,
     ]);
-
-    console.log(`- Users matching test user: ${userCount.rows[0].count} (Expected: 1)`);
-    console.log(`- Organizations matching test onboarding: ${orgCount.rows[0].count} (Expected: 1)`);
-    console.log(`- Memberships matching test onboarding: ${memberCount.rows[0].count} (Expected: 1)`);
-    console.log(`- API Keys created: ${keyCount.rows[0].count} (Expected: 0)`);
-    console.log(`- Usage Events created: ${usageCount.rows[0].count} (Expected: 0)`);
 
     if (
       userCount.rows[0].count !== "1" ||
@@ -271,23 +266,32 @@ async function runE2E() {
     ) {
       throw new Error("PostgreSQL post-E2E state audit mismatch!");
     }
-    console.log("✅ Database state post-E2E strictly matches all requirements!");
-
-    // Clean up temporary test data
-    console.log("\n🧹 Cleaning up temporary test records...");
-    await pool.query("DELETE FROM organizations WHERE id = $1;", [createdOrgId]);
-    await pool.query("DELETE FROM \"user\" WHERE id = $1;", [createdUserId]);
-    console.log("✅ Cleanup complete. Development database left clean.");
+    console.log("✅ Database state post-E2E strictly verified.");
 
     console.log("\n==================================================");
     console.log("🎉 ALL E2E & DATABASE CHECKS PASSED SUCCESSFULLY!");
     console.log("==================================================");
   } finally {
+    // Scoped cleanup targeting exact created test IDs
+    if (createdOrgId || createdUserId) {
+      try {
+        console.log("\n🧹 Cleaning up temporary test records...");
+        if (createdOrgId) {
+          await pool.query('DELETE FROM organizations WHERE id = $1;', [createdOrgId]);
+        }
+        if (createdUserId) {
+          await pool.query('DELETE FROM "user" WHERE id = $1;', [createdUserId]);
+        }
+        console.log("✅ Cleanup complete. Development database left clean.");
+      } catch (cleanupErr) {
+        console.error("⚠️ Failed to clean up temporary test records:", (cleanupErr as Error).message);
+      }
+    }
     await pool.end();
   }
 }
 
 runE2E().catch((err) => {
-  console.error("❌ E2E Failed:", err.message || err);
+  console.error("❌ E2E Failed:", (err as Error).message || err);
   process.exit(1);
 });

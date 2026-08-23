@@ -5,44 +5,7 @@ import { createOrganizationWithMembership, getUserFirstOrganization } from "@/li
 import { eq, sql } from "drizzle-orm";
 import crypto from "node:crypto";
 
-function assertSafeTestEnvironment() {
-  if (process.env.NODE_ENV === "production" || process.env.VERCEL_ENV === "production") {
-    throw new Error(
-      "Refusing to execute live database integration tests in production environment (NODE_ENV/VERCEL_ENV is 'production')."
-    );
-  }
-  if (process.env.RUN_DB_INTEGRATION_TESTS !== "true") {
-    throw new Error(
-      "Live database integration tests require explicit opt-in: RUN_DB_INTEGRATION_TESTS=true."
-    );
-  }
-  if (process.env.DATABASE_ENV !== "development") {
-    throw new Error(
-      "Live database integration tests require DATABASE_ENV='development'."
-    );
-  }
-  const dbUrl = process.env.DATABASE_URL;
-  if (!dbUrl) {
-    throw new Error("DATABASE_URL is not set for integration tests.");
-  }
-  try {
-    const parsed = new URL(dbUrl);
-    const isSafeDev =
-      parsed.hostname.includes("neon.tech") ||
-      parsed.hostname.includes("localhost") ||
-      parsed.hostname.includes("127.0.0.1");
-
-    if (!isSafeDev) {
-      throw new Error(
-        "Refusing to run integration tests against an unverified or production database host."
-      );
-    }
-  } catch (err) {
-    throw new Error(
-      `Database URL safety verification failed: ${(err as Error).message}`
-    );
-  }
-}
+import { assertDevelopmentDatabaseSafety } from "@/db/development-safety";
 
 describe("Live PostgreSQL Integration Tests", () => {
   const testUserId = `test-user-${crypto.randomUUID()}`;
@@ -51,7 +14,7 @@ describe("Live PostgreSQL Integration Tests", () => {
 
   beforeAll(async () => {
     // 1. Enforce strict non-production environment safety guards
-    assertSafeTestEnvironment();
+    assertDevelopmentDatabaseSafety();
 
     // 2. Insert test user into auth user table
     try {

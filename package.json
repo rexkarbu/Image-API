@@ -15,6 +15,7 @@
     "db:migrate": "dotenv -e .env.local -e .env -- tsx src/db/migrate.ts",
     "db:check": "dotenv -e .env.local -e .env -- drizzle-kit check",
     "db:smoke": "dotenv -e .env.local -e .env -- tsx src/db/smoke.ts",
+    "db:verify": "dotenv -e .env.local -e .env -- tsx src/db/verify-metadata.ts",
     "db:studio": "dotenv -e .env.local -e .env -- drizzle-kit studio"
   },
   "engines": {
