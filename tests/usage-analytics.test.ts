@@ -90,6 +90,8 @@ describe("Usage Analytics Service Unit Tests", () => {
       { statusCode: "200abc" }, // malformed status code
       { endpoint: "/v1/attacker/endpoint" }, // disallowed endpoint
       { apiKeyId: "invalid key with spaces" }, // malformed key ID
+      { apiKeyId: "key_live_12345-abc_XYZ" }, // non-UUID key ID
+      { apiKeyId: "12345678-1234-4234-8234-123456789ABC" }, // uppercase UUID key ID
       { cursor: "malformed_cursor_base64" }, // malformed cursor
       { range: ["24h", "7d"] as any }, // duplicate array parameters
     ];

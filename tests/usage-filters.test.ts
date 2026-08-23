@@ -11,9 +11,10 @@ import {
   isValidCalendarDate,
 } from "@/lib/validations/usage-filters";
 
-describe("Usage Filters, Range Math & Canonical Cursor Validation", () => {
+describe("Usage Filters, Range Math & Exact Cursor Canonicalization", () => {
   const fixedNow = new Date("2026-08-23T16:00:00.000Z");
-  const validUuid = "12345678-1234-4234-8234-123456789abc";
+  // Valid lowercase UUID v4 (version 4, variant 8/9/a/b)
+  const validUuidV4 = "12345678-1234-4234-8234-123456789abc";
 
   it("defaults cleanly to 30d preset when no parameters are provided", () => {
     const res = parseUsageFilters({}, fixedNow);
@@ -153,15 +154,28 @@ describe("Usage Filters, Range Math & Canonical Cursor Validation", () => {
     }
   });
 
-  it("strictly validates API key ID format", () => {
-    const validId = "key_live_12345-abc_XYZ";
-    expect(parseUsageFilters({ apiKeyId: validId }, fixedNow).filters.apiKeyId).toBe(validId);
+  it("strictly validates API key ID format using exact lowercase UUID v4 contract", () => {
+    // Valid lowercase UUID v4
+    expect(parseUsageFilters({ apiKeyId: validUuidV4 }, fixedNow).filters.apiKeyId).toBe(validUuidV4);
 
-    const resBad = parseUsageFilters({ apiKeyId: "key with spaces" }, fixedNow);
-    expect(resBad.success).toBe(false);
+    // Uppercase UUID rejected
+    expect(parseUsageFilters({ apiKeyId: validUuidV4.toUpperCase() }, fixedNow).success).toBe(false);
 
-    const resTooLong = parseUsageFilters({ apiKeyId: "a".repeat(65) }, fixedNow);
-    expect(resTooLong.success).toBe(false);
+    // Arbitrary alphanumeric prefix/string rejected
+    expect(parseUsageFilters({ apiKeyId: "key_live_12345-abc_XYZ" }, fixedNow).success).toBe(false);
+
+    // Nil UUID rejected
+    expect(parseUsageFilters({ apiKeyId: "00000000-0000-0000-0000-000000000000" }, fixedNow).success).toBe(false);
+
+    // Invalid UUID version (v1 instead of v4)
+    expect(parseUsageFilters({ apiKeyId: "12345678-1234-1234-8234-123456789abc" }, fixedNow).success).toBe(false);
+
+    // Invalid UUID variant (c instead of 8/9/a/b)
+    expect(parseUsageFilters({ apiKeyId: "12345678-1234-4234-c234-123456789abc" }, fixedNow).success).toBe(false);
+
+    // Malformed spacing or length
+    expect(parseUsageFilters({ apiKeyId: ` ${validUuidV4} ` }, fixedNow).success).toBe(false);
+    expect(parseUsageFilters({ apiKeyId: validUuidV4 + "a" }, fixedNow).success).toBe(false);
   });
 
   it("strictly validates endpoint against whitelist", () => {
@@ -243,48 +257,70 @@ describe("Usage Filters, Range Math & Canonical Cursor Validation", () => {
     expect(hourBuckets[2].label).toBe("16:00");
   });
 
-  it("encodes and decodes opaque pagination cursors deterministically with UUID event ID", () => {
+  it("encodes and decodes opaque pagination cursors deterministically with UUID v4 event ID", () => {
     const date = new Date("2026-08-23T12:34:56.789Z");
 
-    const cursor = encodeCursor(date, validUuid);
+    const cursor = encodeCursor(date, validUuidV4);
     expect(typeof cursor).toBe("string");
     expect(cursor.length).toBeGreaterThan(0);
 
     const decoded = decodeCursor(cursor, fixedNow);
     expect(decoded).not.toBeNull();
     expect(decoded?.createdAt.toISOString()).toBe(date.toISOString());
-    expect(decoded?.id).toBe(validUuid);
+    expect(decoded?.id).toBe(validUuidV4);
   });
 
-  it("hardened cursor validation rejects non-UUID IDs, non-canonical ISO strings, future dates, and malformed inputs fail-closed", () => {
+  it("enforces complete cursor canonicalization and rejects all non-canonical, reversed, whitespace, or invalid variants", () => {
     expect(decodeCursor(undefined, fixedNow)).toBeNull();
     expect(decodeCursor(null, fixedNow)).toBeNull();
     expect(decodeCursor("", fixedNow)).toBeNull();
     expect(decodeCursor("not-base64-json", fixedNow)).toBeNull();
     expect(decodeCursor("a".repeat(257), fixedNow)).toBeNull();
 
+    // Reversed JSON key order {"i":"...","c":"..."}
+    const reversedKeys = Buffer.from(JSON.stringify({ i: validUuidV4, c: "2026-08-23T00:00:00.000Z" })).toString("base64url");
+    expect(decodeCursor(reversedKeys, fixedNow)).toBeNull();
+
+    // JSON whitespace {"c": "..." , "i": "..."}
+    const withWhitespace = Buffer.from('{"c":"2026-08-23T00:00:00.000Z", "i":"' + validUuidV4 + '"}').toString("base64url");
+    expect(decodeCursor(withWhitespace, fixedNow)).toBeNull();
+
+    // Base64 with padding
+    const paddedBase64 = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: validUuidV4 })).toString("base64");
+    if (paddedBase64.includes("=")) {
+      expect(decodeCursor(paddedBase64, fixedNow)).toBeNull();
+    }
+
+    // Uppercase UUID in cursor
+    const uppercaseUuidCursor = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: validUuidV4.toUpperCase() })).toString("base64url");
+    expect(decodeCursor(uppercaseUuidCursor, fixedNow)).toBeNull();
+
     // Extra fields
-    const extraField = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: validUuid, extra: "val" })).toString("base64url");
+    const extraField = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: validUuidV4, extra: "val" })).toString("base64url");
     expect(decodeCursor(extraField, fixedNow)).toBeNull();
 
     // Non-canonical date without milliseconds (.000Z)
-    const noMsDate = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00Z", i: validUuid })).toString("base64url");
+    const noMsDate = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00Z", i: validUuidV4 })).toString("base64url");
     expect(decodeCursor(noMsDate, fixedNow)).toBeNull();
 
     // Invalid date string
-    const invalidDate = Buffer.from(JSON.stringify({ c: "not-a-date", i: validUuid })).toString("base64url");
+    const invalidDate = Buffer.from(JSON.stringify({ c: "not-a-date", i: validUuidV4 })).toString("base64url");
     expect(decodeCursor(invalidDate, fixedNow)).toBeNull();
 
     // Impossible calendar date (Feb 29, 2026)
-    const impossibleDate = Buffer.from(JSON.stringify({ c: "2026-02-29T00:00:00.000Z", i: validUuid })).toString("base64url");
+    const impossibleDate = Buffer.from(JSON.stringify({ c: "2026-02-29T00:00:00.000Z", i: validUuidV4 })).toString("base64url");
     expect(decodeCursor(impossibleDate, fixedNow)).toBeNull();
 
     // Future timestamp (>60s in future)
     const futureDate = new Date(fixedNow.getTime() + 120_000).toISOString();
-    const futureCursor = Buffer.from(JSON.stringify({ c: futureDate, i: validUuid })).toString("base64url");
+    const futureCursor = Buffer.from(JSON.stringify({ c: futureDate, i: validUuidV4 })).toString("base64url");
     expect(decodeCursor(futureCursor, fixedNow)).toBeNull();
 
-    // Non-UUID ID format
+    // Nil UUID
+    const nilUuidCursor = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: "00000000-0000-0000-0000-000000000000" })).toString("base64url");
+    expect(decodeCursor(nilUuidCursor, fixedNow)).toBeNull();
+
+    // Non-UUID v4 ID format
     const nonUuid = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: "evt-not-a-uuid" })).toString("base64url");
     expect(decodeCursor(nonUuid, fixedNow)).toBeNull();
 

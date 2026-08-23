@@ -37,12 +37,13 @@ export type ParseFiltersResult =
 const BASE64URL_REGEX = /^[A-Za-z0-9_-]+$/;
 const CANONICAL_CUSTOM_DATE_REGEX = /^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/;
 const CANONICAL_ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Strict lowercase UUID v4 contract
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const STATUS_CODE_REGEX = /^2\d{2}$/;
-const API_KEY_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /**
  * Encodes an opaque, URL-safe pagination cursor for deterministic pagination.
+ * Generates canonical JSON {"c":"...","i":"..."} without whitespace in exact key order.
  */
 export function encodeCursor(createdAt: Date, id: string): string {
   const payload = JSON.stringify({ c: createdAt.toISOString(), i: id });
@@ -50,8 +51,9 @@ export function encodeCursor(createdAt: Date, id: string): string {
 }
 
 /**
- * Decodes and strictly validates an opaque pagination cursor.
- * Returns null fail-closed if the cursor is malformed, non-canonical, has invalid dates, non-UUID IDs, or unexpected keys.
+ * Decodes and strictly validates an opaque pagination cursor against canonical representation.
+ * Returns null fail-closed if the cursor is malformed, non-canonical, has invalid dates,
+ * non-UUID-v4 IDs, reversed keys, whitespace, padding, or unexpected keys.
  */
 export function decodeCursor(
   cursorString?: string | null,
@@ -104,8 +106,15 @@ export function decodeCursor(
       return null;
     }
 
-    // Must match exact UUID format of usage_events.id
-    if (!UUID_REGEX.test(parsed.i)) {
+    // Must match exact lowercase UUID v4 format of usage_events.id
+    if (!UUID_V4_REGEX.test(parsed.i)) {
+      return null;
+    }
+
+    // Strict canonicalization check: Re-encoded cursor must match the input string byte-for-byte
+    // This rejects reversed JSON key order, JSON whitespace, padding, uppercase UUIDs, etc.
+    const canonicalCursor = encodeCursor(date, parsed.i);
+    if (canonicalCursor !== cursorString) {
       return null;
     }
 
@@ -253,10 +262,10 @@ export function parseUsageFilters(
     statusCode = parseInt(rawStatusCode.val, 10);
   }
 
-  // Validate API key ID
+  // Validate API key ID: must match exact lowercase UUID v4
   let apiKeyId: string | undefined;
   if (rawApiKeyId.isPresent) {
-    if (!rawApiKeyId.val || !API_KEY_ID_REGEX.test(rawApiKeyId.val)) {
+    if (!rawApiKeyId.val || !UUID_V4_REGEX.test(rawApiKeyId.val)) {
       return {
         success: false,
         error: "Invalid API key identifier format.",
