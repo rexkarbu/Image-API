@@ -6,11 +6,14 @@
   - **M0.2**: Live PostgreSQL integration with Neon (pooled runtime + direct migration connections), Better Auth session/auth lifecycle verified E2E, and guarded live integration test suite.
   - **M0.3**: Exact development database endpoint pinning, centralized fail-closed development-safety guard, strict direct-only migration runner, and assertion-based schema metadata verification.
 
-- [ ] **Milestone 1: Secure API-Key Lifecycle**
-  - Cryptographic API key generation with SHA-256 hashing.
-  - One-time key reveal modal and secure prefix indexing (`img_live_...`).
-  - Key management UI (list, revoke, status filtering).
-  - Secret key masking and last-used tracking.
+- [x] **Milestone 1: Secure API-Key Lifecycle**
+  - Cryptographic API key generation with SHA-256 hashing (`img_live_<43 chars base64url>`).
+  - One-time key reveal modal and secure prefix indexing (`img_live_ab12cd34••••••••`).
+  - Tenant-scoped key management UI (`/dashboard/api-keys` with status filters: all, active, expired, revoked).
+  - Secret key masking, last-used tracking, and idempotent revocation.
+  - Atomic key rotation with immediate revocation or 24-hour transition grace period.
+  - Append-only `api_key_audit_events` stream tracking creation, rotation, and revocation.
+  - Server-only API key verification foundation (image endpoint and usage recording remain scheduled for Milestone 2).
 
 - [ ] **Milestone 2: Image Transformation Endpoint & Accurate Usage Recording**
   - Binary image processing with `sharp` (resize, convert, compress).

@@ -1,5 +1,8 @@
+import Link from "next/link";
 import { requireOrganizationContext } from "@/lib/tenant/context";
+import { listApiKeys } from "@/lib/services/api-keys";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { siteConfig } from "@/config/site";
 
 export const runtime = "nodejs";
@@ -7,6 +10,8 @@ export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
   const { user, organization, membership } = await requireOrganizationContext();
+  const allKeys = await listApiKeys({ organizationId: organization.id });
+  const activeKeysCount = allKeys.filter((k) => k.status === "active").length;
 
   return (
     <div className="space-y-8">
@@ -66,28 +71,53 @@ export default async function DashboardPage() {
 
       {/* Real Empty Foundation States */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* API Keys Foundation State */}
+        {/* API Keys Live Summary Card */}
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-base font-semibold">API Keys</CardTitle>
-              <span className="inline-flex items-center rounded bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 text-xs font-mono text-neutral-600 dark:text-neutral-400">
-                Milestone 1
-              </span>
+              <Link
+                href="/dashboard/api-keys"
+                className="text-xs font-medium text-neutral-900 dark:text-neutral-100 hover:underline"
+              >
+                Manage keys →
+              </Link>
             </div>
             <CardDescription>
-              Cryptographically hashed keys used to authenticate requests to {siteConfig.name}.
+              Cryptographically hashed secret keys used to authenticate requests to {siteConfig.name}.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="rounded-md border border-dashed border-neutral-300 dark:border-neutral-800 p-8 text-center space-y-2">
-              <p className="text-xs font-mono text-neutral-500 dark:text-neutral-400">
-                No active API keys yet
-              </p>
-              <p className="text-xs text-neutral-600 dark:text-neutral-400 max-w-sm mx-auto">
-                Secure API key creation, prefix indexing, and one-time secret revelation will be enabled in Milestone 1.
-              </p>
-            </div>
+            {activeKeysCount > 0 ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-3 rounded-lg bg-neutral-50 dark:bg-neutral-900/60 border border-neutral-200 dark:border-neutral-800">
+                  <div className="space-y-0.5">
+                    <div className="text-xs font-semibold text-neutral-900 dark:text-neutral-100">
+                      {activeKeysCount} Active API {activeKeysCount === 1 ? "Key" : "Keys"}
+                    </div>
+                    <div className="text-[11px] text-neutral-500">
+                      Scoped for <code className="font-mono">image:transform</code>
+                    </div>
+                  </div>
+                  <Link href="/dashboard/api-keys">
+                    <Button variant="outline" size="sm" className="h-7 text-xs">
+                      View All ({allKeys.length})
+                    </Button>
+                  </Link>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed border-neutral-300 dark:border-neutral-800 p-6 text-center space-y-3">
+                <p className="text-xs font-mono text-neutral-500 dark:text-neutral-400">
+                  No active API keys yet
+                </p>
+                <Link href="/dashboard/api-keys">
+                  <Button variant="outline" size="sm" className="text-xs">
+                    Create API Key
+                  </Button>
+                </Link>
+              </div>
+            )}
           </CardContent>
         </Card>
 

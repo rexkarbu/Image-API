@@ -8,6 +8,13 @@
       "when": 1787437960529,
       "tag": "0000_luxuriant_master_mold",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787462456283,
+      "tag": "0001_outgoing_shinobi_shaw",
+      "breakpoints": true
     }
   ]
 }

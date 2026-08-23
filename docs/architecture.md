@@ -44,11 +44,27 @@
 - Protects administrative routes and onboarding logic on the server prior to data access.
 
 ### API Consumer Authentication (Machine-to-Machine)
-- Inbound API requests will present Bearer tokens (`img_live_...`).
-- Tokens are hashed using SHA-256 and matched against `api_keys.key_hash`.
-- Plaintext keys are never stored in the database or logs.
+- Inbound API requests present Bearer tokens in the format `img_live_<base64url-secret>`.
+- **Entropy & Encoding**: 32 bytes of cryptographically secure random entropy (`crypto.randomBytes(32)`) encoded as unpadded Base64URL (43 characters). Total key length: 52 characters.
+- **SHA-256 at Rest**: Tokens are hashed using SHA-256 (stored as 64 lowercase hexadecimal characters) and matched against `api_keys.key_hash`.
+- **Display Prefix**: The database stores `key_prefix` (e.g. `img_live_ab12cd34`) used for dashboard display (`img_live_ab12cd34••••••••`).
+- **Zero Plaintext Persistence**: Plaintext keys are never stored in the database, cookies, browser storage, error messages, or logs.
+- **One-Time Reveal**: Plaintext keys leave the server exactly once in the response of the creation/rotation Server Action.
+- **Lifecycle & Audit**:
+  - `api_keys` records: `active`, `expired` (derived when `expires_at <= now`), and `revoked`.
+  - `api_key_audit_events`: Append-only audit stream tracking `created`, `revoked`, `rotation_created`, and `expiration_scheduled`.
+  - **Rotation**: Supports `immediate` revocation or `grace_24h` transition (old key remains usable for 24 hours).
+  - **Throttled Last Used**: Verification updates `last_used_at` at most once every 5 minutes to prevent write amplification.
 
 ---
+
+### Role-Based Access Control (RBAC) Matrix
+| Operation | `owner` | `admin` | `member` |
+| :--- | :---: | :---: | :---: |
+| **List API Key Metadata** | Allowed | Allowed | Allowed (Read-only) |
+| **Create Secret Key** | Allowed | Allowed | Denied (`403 Forbidden`) |
+| **Rotate Secret Key** | Allowed | Allowed | Denied (`403 Forbidden`) |
+| **Revoke Secret Key** | Allowed | Allowed | Denied (`403 Forbidden`) |
 
 ## 3. Multi-Tenancy & Security Invariants
 

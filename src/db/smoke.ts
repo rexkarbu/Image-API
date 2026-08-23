@@ -6,6 +6,7 @@ dotenv.config({ path: ".env" });
 
 const EXPECTED_TABLES = [
   "account",
+  "api_key_audit_events",
   "api_keys",
   "organization_members",
   "organizations",

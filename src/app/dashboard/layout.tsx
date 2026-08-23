@@ -27,6 +27,21 @@ export default async function DashboardLayout({
               <span>{siteConfig.name}</span>
             </Link>
 
+            <nav className="flex items-center space-x-4 text-xs font-medium">
+              <Link
+                href="/dashboard"
+                className="text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 transition-colors"
+              >
+                Overview
+              </Link>
+              <Link
+                href="/dashboard/api-keys"
+                className="text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 transition-colors"
+              >
+                API Keys
+              </Link>
+            </nav>
+
             <div className="hidden sm:flex items-center space-x-2 text-xs font-mono">
               <span className="text-neutral-400 dark:text-neutral-600">/</span>
               <span className="font-medium text-neutral-700 dark:text-neutral-300 px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800">

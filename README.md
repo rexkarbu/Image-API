@@ -7,8 +7,17 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 **Milestone 0 — Project Foundation, Auth, Database, and Multi-Tenancy** (Completed)
 - **M0.1**: Upgraded to Next.js 16.3.2, ESLint Flat Config, patched Drizzle ORM security release, and enforced secure foreign-key delete actions (`CASCADE` / `RESTRICT` / `SET NULL`).
 - **M0.2**: Live PostgreSQL integration with Neon (pooled runtime + direct migration connections), Better Auth session/auth lifecycle verified E2E, and guarded live integration test suite.
+- **M0.3**: Pinned development database endpoint ID, centralized fail-closed development-safety guard, direct-only migration runner, and assertion-based schema verifier.
 
-*Milestone 1 (API-Key Lifecycle) has not been started.*
+**Milestone 1 — Secure API-Key Lifecycle** (Completed)
+- Cryptographic key generation with SHA-256 hashing at rest (`img_live_<43 chars base64url>`).
+- One-time reveal modal and secure display prefix indexing (`img_live_ab12cd34••••••••`).
+- Tenant-scoped API key management dashboard (`/dashboard/api-keys` with status filtering).
+- Safe key rotation with immediate invalidation or 24-hour transition grace period.
+- Append-only `api_key_audit_events` tracking creation, rotation, and revocation.
+- Server-only API key verification foundation with throttled `last_used_at` writes.
+
+*Milestone 2 (Image Transformation Endpoint & Metering) is scheduled next.*
 
 ---
 
@@ -92,25 +101,27 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (56 tests).
-- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (5 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite (89 tests).
+- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (10 tests).
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.
 - `pnpm db:check`: Checks Drizzle schema snapshot consistency.
 - `pnpm db:migrate`: Executes pending SQL migrations over direct connection.
-- `pnpm db:smoke`: Validates live PostgreSQL connection and verifies all 8 tables.
+- `pnpm db:smoke`: Validates live PostgreSQL connection and verifies all 9 tables.
 - `pnpm db:verify`: Executes assertion-based metadata verification against live schema.
 - `pnpm db:studio`: Opens Drizzle Studio for visual database inspection.
 
 ---
 
-## What Is Intentionally Deferred (Out of Scope for M0)
+## What Is Intentionally Deferred (Out of Scope for M1)
 
 The following features are intentionally not implemented yet and are scheduled for subsequent milestones:
 
-- Image processing endpoint (`POST /v1/images/transform`) and `sharp`.
-- Plaintext API key creation and secret revelation UI.
-- Rate limiting and Redis/Upstash integrations.
-- Stripe customer synchronization and metered billing reporting.
+- Image processing endpoint (`POST /v1/images/transform`) and `sharp` (Milestone 2).
+- Multipart upload parsing and image transformations (Milestone 2).
+- Usage event recording and request metering (Milestone 2).
+- Real-time usage event stream visualization on dashboard (Milestone 3).
+- Rate limiting and Redis/Upstash integrations (Milestone 4).
+- Stripe customer synchronization and metered billing reporting (Milestone 5).
 - Background worker queues and async job dispatch.
 - Multi-user invitations and team management.
 - Email delivery provider integration for verification links.

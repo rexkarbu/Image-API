@@ -45,3 +45,11 @@
 11. **Release-Safety & Audit Policy**
     - Before any production deployment, check the latest stable Next.js security releases, execute `pnpm audit --prod`, and run the complete validation test and build suite.
 
+12. **API Key Lifecycle, One-Time Reveal, and Rotation Policy (Milestone 1)**
+    - API keys follow the exact format `img_live_<32-byte-base64url-secret>` (52 characters total length).
+    - Keys are stored exclusively as 64-character lowercase SHA-256 hashes (`key_hash`) along with non-sensitive display prefixes (`img_live_ab12cd34`).
+    - One-time reveal: The full plaintext key is delivered to the browser exactly once in the successful creation or rotation response and wiped from React state immediately upon dialog dismissal.
+    - Rotation: Supports `immediate` (instant revocation of old key) or `grace_24h` (old key remains active for a 24-hour transition window to prevent deployment downtime).
+    - Append-only audit: The `api_key_audit_events` table tracks all lifecycle transitions (`created`, `revoked`, `rotation_created`, `expiration_scheduled`) without recording plaintext keys or hashes.
+    - Throttled activity timestamps: `last_used_at` updates are throttled to at most once per 5 minutes to prevent write amplification.
+

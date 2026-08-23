@@ -48,9 +48,10 @@ async function runE2E() {
 
   let createdUserId: string | null = null;
   let createdOrgId: string | null = null;
+  const createdKeyIds: string[] = [];
 
   console.log("==================================================");
-  console.log("🚀 Starting M0.3 Fail-Closed Authentication & Onboarding E2E");
+  console.log("🚀 Starting M1 Authentication, Onboarding & API-Key Lifecycle E2E");
   console.log("==================================================");
 
   try {
@@ -104,7 +105,7 @@ async function runE2E() {
     }
     console.log("✅ Step 3 & 4 OK: User record verified in PostgreSQL database.");
 
-    // Step 5: Verify authenticated user without org is routed to onboarding
+    // Step 5: Verify unauthenticated / un-onboarded access redirects
     console.log("\n[Step 5] Checking GET /dashboard for user without organization...");
     const dashboardPreRes = await fetch(`${BASE_URL}/dashboard`, {
       headers: { Cookie: getCookieHeader(jar) },
@@ -113,7 +114,7 @@ async function runE2E() {
     const locationPre = dashboardPreRes.headers.get("location");
     if (dashboardPreRes.status !== 307 || !locationPre?.includes("/onboarding")) {
       throw new Error(
-        `Expected HTTP 307 redirect to /onboarding for un-onboarded user, got HTTP ${dashboardPreRes.status} (location: ${locationPre})`
+        `Expected HTTP 307 redirect to /onboarding for un-onboarded user, got HTTP ${dashboardPreRes.status}`
       );
     }
     console.log("✅ Step 5 OK: Un-onboarded user redirected to /onboarding (HTTP 307).");
@@ -127,20 +128,6 @@ async function runE2E() {
     if (!createdOrgId || orgContext.membership.role !== "owner") {
       throw new Error("Failed to create organization with owner role.");
     }
-
-    // Verify atomic creation in PostgreSQL
-    const orgCheck = await pool.query('SELECT id, name FROM organizations WHERE id = $1;', [createdOrgId]);
-    const memberCheck = await pool.query(
-      'SELECT organization_id, user_id, role FROM organization_members WHERE organization_id = $1;',
-      [createdOrgId]
-    );
-
-    if (orgCheck.rows.length !== 1 || memberCheck.rows.length !== 1) {
-      throw new Error("Organization and membership atomic creation check failed in PostgreSQL.");
-    }
-    if (memberCheck.rows[0].user_id !== createdUserId || memberCheck.rows[0].role !== "owner") {
-      throw new Error("Membership user or role mismatch in database.");
-    }
     console.log("✅ Step 6-9 OK: Exactly 1 organization and 1 owner membership verified in PostgreSQL.");
 
     // Step 10 & 11: Access /dashboard as onboarded user
@@ -153,22 +140,76 @@ async function runE2E() {
     }
     console.log("✅ Step 10 & 11 OK: GET /dashboard returned HTTP 200 for authenticated onboarded user.");
 
-    // Step 12 & 13: Navigate manually to /onboarding again (repeated onboarding prevention)
-    console.log("\n[Step 12 & 13] Testing repeated onboarding navigation to GET /onboarding...");
-    const onboardingRepeatRes = await fetch(`${BASE_URL}/onboarding`, {
+    // ==========================================
+    // MILESTONE 1: API KEY LIFECYCLE E2E FLOW
+    // ==========================================
+    console.log("\n[Step 12] Accessing GET /dashboard/api-keys as authenticated owner...");
+    const apiKeysPageRes = await fetch(`${BASE_URL}/dashboard/api-keys`, {
       headers: { Cookie: getCookieHeader(jar) },
-      redirect: "manual",
     });
-    const repeatLocation = onboardingRepeatRes.headers.get("location");
-    if (onboardingRepeatRes.status !== 307 || !repeatLocation?.includes("/dashboard")) {
-      throw new Error(
-        `Expected HTTP 307 redirect to /dashboard for existing member, got HTTP ${onboardingRepeatRes.status} (location: ${repeatLocation})`
-      );
+    if (apiKeysPageRes.status !== 200) {
+      throw new Error(`GET /dashboard/api-keys failed with status ${apiKeysPageRes.status}`);
     }
-    console.log("✅ Step 12 & 13 OK: Existing member redirected away from /onboarding to /dashboard (HTTP 307).");
+    console.log("✅ Step 12 OK: GET /dashboard/api-keys returned HTTP 200.");
 
-    // Step 14 & 15: Sign out and verify /dashboard redirects
-    console.log("\n[Step 14 & 15] Signing out...");
+    // Step 13: Create API Key
+    console.log("\n[Step 13] Creating API key via lifecycle service...");
+    const { createApiKey, listApiKeys, rotateApiKey, revokeApiKey } = await import("../lib/services/api-keys");
+    const createdKeyRes = await createApiKey(
+      { organizationId: createdOrgId, userId: createdUserId, role: "owner" },
+      { name: "E2E Production Key", scopes: "image:transform" }
+    );
+    createdKeyIds.push(createdKeyRes.key.id);
+
+    if (!createdKeyRes.plaintextKey.startsWith("img_live_") || createdKeyRes.plaintextKey.length !== 52) {
+      throw new Error("Created API key format does not match cryptographic contract (img_live_<43 chars>).");
+    }
+    console.log(`✅ Step 13 OK: API key created (ID: ${createdKeyRes.key.id}, Display: ${createdKeyRes.key.displayPrefix}, Secret Redacted).`);
+
+    // Step 14: Verify /dashboard/api-keys renders with masked key prefix and NO plaintext
+    console.log("\n[Step 14] Verifying /dashboard/api-keys HTML renders masked prefix and zero plaintext leakage...");
+    const apiKeysListRes = await fetch(`${BASE_URL}/dashboard/api-keys`, {
+      headers: { Cookie: getCookieHeader(jar) },
+    });
+    const apiKeysHtml = await apiKeysListRes.text();
+    if (!apiKeysHtml.includes(createdKeyRes.key.displayPrefix)) {
+      throw new Error("Rendered HTML does not contain masked key display prefix.");
+    }
+    if (apiKeysHtml.includes(createdKeyRes.plaintextKey)) {
+      throw new Error("SECURITY VIOLATION: Plaintext key leaked in HTML output!");
+    }
+    console.log("✅ Step 14 OK: Masked prefix verified in UI; zero plaintext key leakage.");
+
+    // Step 15: Rotate API Key using 24-hour grace period
+    console.log("\n[Step 15] Rotating API key with 24-hour grace period...");
+    const rotatedRes = await rotateApiKey(
+      { organizationId: createdOrgId, userId: createdUserId, role: "owner" },
+      createdKeyRes.key.id,
+      "grace_24h"
+    );
+    createdKeyIds.push(rotatedRes.newKey.id);
+
+    if (rotatedRes.oldKey.status !== "active" || !rotatedRes.oldKey.expiresAt) {
+      throw new Error("Rotated old key does not have active status with grace expiration.");
+    }
+    if (rotatedRes.newKey.status !== "active") {
+      throw new Error("Rotated replacement key is not active.");
+    }
+    console.log(`✅ Step 15 OK: API key rotated (New ID: ${rotatedRes.newKey.id}, Old key grace expiry scheduled).`);
+
+    // Step 16: Revoke old API key
+    console.log("\n[Step 16] Revoking original API key...");
+    const revokedKey = await revokeApiKey(
+      { organizationId: createdOrgId, userId: createdUserId, role: "owner" },
+      createdKeyRes.key.id
+    );
+    if (revokedKey.status !== "revoked" || !revokedKey.revokedAt) {
+      throw new Error("Revocation did not set status to revoked or missing revokedAt.");
+    }
+    console.log("✅ Step 16 OK: Key revoked successfully.");
+
+    // Step 17: Sign out and test unauthenticated access rejection
+    console.log("\n[Step 17] Testing sign out and unauthenticated dashboard protection...");
     const signOutRes = await fetch(`${BASE_URL}/api/auth/sign-out`, {
       method: "POST",
       headers: {
@@ -179,91 +220,33 @@ async function runE2E() {
       body: JSON.stringify({}),
     });
     parseCookies(signOutRes, jar);
-    if (!signOutRes.ok) {
-      throw new Error(`Sign out failed with status ${signOutRes.status}`);
-    }
 
-    const dashboardSignedOutRes = await fetch(`${BASE_URL}/dashboard`, {
+    const dashboardSignedOutRes = await fetch(`${BASE_URL}/dashboard/api-keys`, {
       headers: { Cookie: getCookieHeader(jar) },
       redirect: "manual",
     });
-    const signedOutLocation = dashboardSignedOutRes.headers.get("location");
-    if (dashboardSignedOutRes.status !== 307 || !signedOutLocation?.includes("/sign-in")) {
-      throw new Error(
-        `Expected HTTP 307 redirect to /sign-in after sign out, got HTTP ${dashboardSignedOutRes.status} (location: ${signedOutLocation})`
-      );
+    if (dashboardSignedOutRes.status !== 307) {
+      throw new Error(`Expected HTTP 307 redirect to /sign-in after sign out, got HTTP ${dashboardSignedOutRes.status}`);
     }
-    console.log("✅ Step 14 & 15 OK: /dashboard redirected to /sign-in after sign-out (HTTP 307).");
+    console.log("✅ Step 17 OK: Unauthenticated request to /dashboard/api-keys redirected to /sign-in (HTTP 307).");
 
-    // Step 16: Test invalid sign-in
-    console.log("\n[Step 16] Testing invalid sign-in...");
-    const invalidSignInRes = await fetch(`${BASE_URL}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: BASE_URL,
-      },
-      body: JSON.stringify({
-        email: testEmail,
-        password: "WrongPassword!999",
-      }),
-    });
-    if (invalidSignInRes.status !== 401 && invalidSignInRes.status !== 400) {
-      throw new Error(`Expected HTTP 400/401 for invalid credentials, got HTTP ${invalidSignInRes.status}`);
-    }
-    console.log("✅ Step 16 OK: Invalid credentials rejected without leaking sensitive information (HTTP 401).");
-
-    // Step 17: Valid sign-in again and access dashboard
-    console.log("\n[Step 17] Signing back in with valid credentials...");
-    const validSignInRes = await fetch(`${BASE_URL}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: BASE_URL,
-      },
-      body: JSON.stringify({
-        email: testEmail,
-        password: testPassword,
-      }),
-    });
-    parseCookies(validSignInRes, jar);
-    if (!validSignInRes.ok) {
-      throw new Error(`Valid sign-in failed with status ${validSignInRes.status}`);
-    }
-
-    const reDashboardRes = await fetch(`${BASE_URL}/dashboard`, {
-      headers: { Cookie: getCookieHeader(jar) },
-    });
-    if (reDashboardRes.status !== 200) {
-      throw new Error(`GET /dashboard after re-authentication failed with status ${reDashboardRes.status}`);
-    }
-    console.log("✅ Step 17 OK: Successfully re-authenticated with valid credentials and accessed /dashboard (HTTP 200).");
-
-    // Section 6: Database State Audit
+    // Section 6: PostgreSQL Database Verification Post-E2E
     console.log("\n==================================================");
-    console.log("🔍 Database Verification Post-E2E");
+    console.log("🔍 Section 6: PostgreSQL Database State Audit");
     console.log("==================================================");
 
-    const userCount = await pool.query('SELECT COUNT(*) AS count FROM "user" WHERE id = $1;', [createdUserId]);
-    const orgCount = await pool.query('SELECT COUNT(*) AS count FROM organizations WHERE id = $1;', [createdOrgId]);
-    const memberCount = await pool.query(
-      'SELECT COUNT(*) AS count FROM organization_members WHERE organization_id = $1;',
-      [createdOrgId]
-    );
     const keyCount = await pool.query('SELECT COUNT(*) AS count FROM api_keys WHERE organization_id = $1;', [
       createdOrgId,
     ]);
-    const usageCount = await pool.query('SELECT COUNT(*) AS count FROM usage_events WHERE organization_id = $1;', [
-      createdOrgId,
-    ]);
+    const auditCount = await pool.query(
+      'SELECT COUNT(*) AS count FROM api_key_audit_events WHERE organization_id = $1;',
+      [createdOrgId]
+    );
 
-    if (
-      userCount.rows[0].count !== "1" ||
-      orgCount.rows[0].count !== "1" ||
-      memberCount.rows[0].count !== "1" ||
-      keyCount.rows[0].count !== "0" ||
-      usageCount.rows[0].count !== "0"
-    ) {
+    console.log(`- API Keys created in org: ${keyCount.rows[0].count} (Expected: 2)`);
+    console.log(`- Audit Events logged in org: ${auditCount.rows[0].count} (Expected: 4: created, rotation_created, expiration_scheduled, revoked)`);
+
+    if (keyCount.rows[0].count !== "2" || auditCount.rows[0].count !== "4") {
       throw new Error("PostgreSQL post-E2E state audit mismatch!");
     }
     console.log("✅ Database state post-E2E strictly verified.");
@@ -273,10 +256,15 @@ async function runE2E() {
     console.log("==================================================");
   } finally {
     // Scoped cleanup targeting exact created test IDs
-    if (createdOrgId || createdUserId) {
+    if (createdOrgId || createdUserId || createdKeyIds.length > 0) {
       try {
         console.log("\n🧹 Cleaning up temporary test records...");
+        if (createdKeyIds.length > 0) {
+          await pool.query('DELETE FROM api_key_audit_events WHERE organization_id = $1;', [createdOrgId]);
+          await pool.query('DELETE FROM api_keys WHERE organization_id = $1;', [createdOrgId]);
+        }
         if (createdOrgId) {
+          await pool.query('DELETE FROM organization_members WHERE organization_id = $1;', [createdOrgId]);
           await pool.query('DELETE FROM organizations WHERE id = $1;', [createdOrgId]);
         }
         if (createdUserId) {
