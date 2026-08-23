@@ -94,3 +94,8 @@
     - Raw Secret Contract Without Trimming: `validateRateLimitSecret()` strictly inspects raw strings without `.trim()`, rejecting whitespace padding, empty explicit secrets, all-zero placeholders, and non-hex characters fail-closed.
     - Exhaustive Upstash Response Validation: Rate limit responses strictly reject `reason: "cacheBlock"` when `success: true`, fractional reset timestamps, and all unvetted SDK reasons (`cache`, `denyList`, `""`, `null`).
     - Fail-Closed Best-Effort Cleanup: Integration tests and HTTP E2E pre-register cleanup identifiers before token consumption and execute `Promise.allSettled` across all tracked keys, exiting nonzero if any cleanup operation fails.
+
+18. **HTTP E2E Unique Client-IP Isolation & Complete 3-Key Cleanup (Milestone 4.3)**
+    - Per-Run IPv6 Client Isolation: Every HTTP E2E execution dynamically generates two distinct, valid documentation IPv6 addresses (`2001:db8::/32`) via `generateIsolatedE2EClientIps()`: `ordinaryClientIp` (for standard transformation and validation checks in Steps 2–7) and `floodClientIp` (for rate-limit exhaustion in Step 8).
+    - Zero Loopback Fallback: Centralized request header injection (`buildE2ERequestHeaders()`) guarantees that every request explicitly injects `x-forwarded-for: <isolatedClientIp>` and strictly prevents test-case overrides, ensuring zero requests fall back to unmanaged `127.0.0.1`.
+    - Complete 3-Identifier Pre-Registration & Cleanup: Before the first HTTP request is dispatched, all three cleanup identifiers (active API key, ordinary IP, and flood IP) are pre-registered and reset using `limiter.resetUsedTokens()` inside `Promise.allSettled`, guaranteeing complete state isolation across consecutive verification runs.

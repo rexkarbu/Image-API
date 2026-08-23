@@ -4,11 +4,12 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 import { assertDevelopmentDatabaseSafety } from "./development-safety";
 import { validateDevelopmentRedisSafety } from "../lib/ratelimit/redis-safety-core";
+import { validateRateLimitSecret } from "../lib/security/rate-limit-core";
 import {
-  validateRateLimitSecret,
-  deriveIpIdentifier,
-  deriveApiKeyIdentifier,
-} from "../lib/security/rate-limit-core";
+  generateIsolatedE2EClientIps,
+  buildE2ERequestHeaders,
+  deriveE2ECleanupIdentifiers,
+} from "../lib/ratelimit/http-e2e-helper";
 import { deriveRequestId } from "../lib/api/idempotency";
 import { validatePostgresUrlSecurity } from "./ssl-validation";
 import { Ratelimit } from "@upstash/ratelimit";
@@ -112,6 +113,9 @@ export async function runHttpE2E(): Promise<void> {
     throw new Error("Preflight safety checks failed.");
   }
 
+  // Generate unique, distinct, canonical IPv6 client identities for this specific run
+  const { ordinaryClientIp, floodClientIp } = generateIsolatedE2EClientIps();
+
   const targetOrigin = validateTargetOrigin(
     process.env.HTTP_E2E_BASE_URL || "http://127.0.0.1:3000"
   );
@@ -167,12 +171,18 @@ export async function runHttpE2E(): Promise<void> {
   const trackedKeyIds = [testKeyId, revokedKeyId, expiredKeyId];
   const trackedRequestDigests: string[] = [];
 
-  const isolatedFloodIp = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
+  // Derive the 3 exact privacy-preserving HMAC cleanup identifiers BEFORE any requests are sent
+  const cleanupIds = deriveE2ECleanupIdentifiers(
+    testOrgId,
+    testKeyId,
+    ordinaryClientIp,
+    floodClientIp
+  );
 
-  // Precompute and register Redis cleanup identifiers BEFORE any requests are sent
   const trackedCleanups: { limiter: Ratelimit; identifier: string }[] = [
-    { limiter: keyLimiter, identifier: deriveApiKeyIdentifier(testOrgId, testKeyId) },
-    { limiter: ipLimiter, identifier: deriveIpIdentifier(isolatedFloodIp) },
+    { limiter: keyLimiter, identifier: cleanupIds.keyIdentifier },
+    { limiter: ipLimiter, identifier: cleanupIds.ordinaryIpIdentifier },
+    { limiter: ipLimiter, identifier: cleanupIds.floodIpIdentifier },
   ];
 
   console.log("==================================================");
@@ -253,12 +263,13 @@ export async function runHttpE2E(): Promise<void> {
 
     const response = await fetch(`${targetOrigin}/v1/images/transform`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${plaintextKey}`,
-        "Idempotency-Key": successIdempotencyKey,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        "Content-Length": String(body.length),
-      },
+      headers: buildE2ERequestHeaders({
+        clientIp: ordinaryClientIp,
+        authorization: `Bearer ${plaintextKey}`,
+        idempotencyKey: successIdempotencyKey,
+        contentType: `multipart/form-data; boundary=${boundary}`,
+        contentLength: body.length,
+      }),
       body: new Uint8Array(body),
     });
 
@@ -320,12 +331,13 @@ export async function runHttpE2E(): Promise<void> {
     console.log("\n[Step 4] Resending identical request with same Idempotency-Key (Sequential Duplicate)...");
     const dupResponse = await fetch(`${targetOrigin}/v1/images/transform`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${plaintextKey}`,
-        "Idempotency-Key": successIdempotencyKey,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        "Content-Length": String(body.length),
-      },
+      headers: buildE2ERequestHeaders({
+        clientIp: ordinaryClientIp,
+        authorization: `Bearer ${plaintextKey}`,
+        idempotencyKey: successIdempotencyKey,
+        contentType: `multipart/form-data; boundary=${boundary}`,
+        contentLength: body.length,
+      }),
       body: new Uint8Array(body),
     });
 
@@ -348,12 +360,13 @@ export async function runHttpE2E(): Promise<void> {
     const sendParallelRequest = () =>
       fetch(`${targetOrigin}/v1/images/transform`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${plaintextKey}`,
-          "Idempotency-Key": parallelKey,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-          "Content-Length": String(body.length),
-        },
+        headers: buildE2ERequestHeaders({
+          clientIp: ordinaryClientIp,
+          authorization: `Bearer ${plaintextKey}`,
+          idempotencyKey: parallelKey,
+          contentType: `multipart/form-data; boundary=${boundary}`,
+          contentLength: body.length,
+        }),
         body: new Uint8Array(body),
       });
 
@@ -405,11 +418,12 @@ export async function runHttpE2E(): Promise<void> {
     for (const testCase of authTestCases) {
       const authRes = await fetch(`${targetOrigin}/v1/images/transform`, {
         method: "POST",
-        headers: {
-          "Idempotency-Key": `idemp-auth-${crypto.randomUUID()}`,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-          ...testCase.headers,
-        },
+        headers: buildE2ERequestHeaders({
+          clientIp: ordinaryClientIp,
+          idempotencyKey: `idemp-auth-${crypto.randomUUID()}`,
+          contentType: `multipart/form-data; boundary=${boundary}`,
+          customHeaders: testCase.headers,
+        }),
         body: new Uint8Array(body),
       });
 
@@ -439,11 +453,12 @@ export async function runHttpE2E(): Promise<void> {
     const badOptBody = buildMultipartBody({ format: "png", quality: "90" }, testImage, badOptBoundary);
     const badOptRes = await fetch(`${targetOrigin}/v1/images/transform`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${plaintextKey}`,
-        "Idempotency-Key": `idemp-badopt-${crypto.randomUUID()}`,
-        "Content-Type": `multipart/form-data; boundary=${badOptBoundary}`,
-      },
+      headers: buildE2ERequestHeaders({
+        clientIp: ordinaryClientIp,
+        authorization: `Bearer ${plaintextKey}`,
+        idempotencyKey: `idemp-badopt-${crypto.randomUUID()}`,
+        contentType: `multipart/form-data; boundary=${badOptBoundary}`,
+      }),
       body: new Uint8Array(badOptBody),
     });
     if (badOptRes.status !== 400) throw new Error("Expected 400 for PNG with quality.");
@@ -453,11 +468,12 @@ export async function runHttpE2E(): Promise<void> {
     const badFitBody = buildMultipartBody({ width: "100", fit: "cover" }, testImage, badFitBoundary);
     const badFitRes = await fetch(`${targetOrigin}/v1/images/transform`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${plaintextKey}`,
-        "Idempotency-Key": `idemp-badfit-${crypto.randomUUID()}`,
-        "Content-Type": `multipart/form-data; boundary=${badFitBoundary}`,
-      },
+      headers: buildE2ERequestHeaders({
+        clientIp: ordinaryClientIp,
+        authorization: `Bearer ${plaintextKey}`,
+        idempotencyKey: `idemp-badfit-${crypto.randomUUID()}`,
+        contentType: `multipart/form-data; boundary=${badFitBoundary}`,
+      }),
       body: new Uint8Array(badFitBody),
     });
     if (badFitRes.status !== 400) throw new Error("Expected 400 for fit without height.");
@@ -467,11 +483,12 @@ export async function runHttpE2E(): Promise<void> {
     const corruptBody = buildMultipartBody({}, Buffer.from("not-an-image-corrupt-data"), corruptBoundary);
     const corruptRes = await fetch(`${targetOrigin}/v1/images/transform`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${plaintextKey}`,
-        "Idempotency-Key": `idemp-corrupt-${crypto.randomUUID()}`,
-        "Content-Type": `multipart/form-data; boundary=${corruptBoundary}`,
-      },
+      headers: buildE2ERequestHeaders({
+        clientIp: ordinaryClientIp,
+        authorization: `Bearer ${plaintextKey}`,
+        idempotencyKey: `idemp-corrupt-${crypto.randomUUID()}`,
+        contentType: `multipart/form-data; boundary=${corruptBoundary}`,
+      }),
       body: new Uint8Array(corruptBody),
     });
     if (corruptRes.status !== 422) throw new Error("Expected 422 for corrupt image.");
@@ -485,11 +502,12 @@ export async function runHttpE2E(): Promise<void> {
     );
     const svgRes = await fetch(`${targetOrigin}/v1/images/transform`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${plaintextKey}`,
-        "Idempotency-Key": `idemp-svg-${crypto.randomUUID()}`,
-        "Content-Type": `multipart/form-data; boundary=${svgBoundary}`,
-      },
+      headers: buildE2ERequestHeaders({
+        clientIp: ordinaryClientIp,
+        authorization: `Bearer ${plaintextKey}`,
+        idempotencyKey: `idemp-svg-${crypto.randomUUID()}`,
+        contentType: `multipart/form-data; boundary=${svgBoundary}`,
+      }),
       body: new Uint8Array(svgBody),
     });
     if (svgRes.status !== 415) throw new Error("Expected 415 for SVG input.");
@@ -499,21 +517,22 @@ export async function runHttpE2E(): Promise<void> {
     const bigBody = buildMultipartBody({}, Buffer.alloc(10.5 * 1024 * 1024), bigBoundary);
     const bigRes = await fetch(`${targetOrigin}/v1/images/transform`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${plaintextKey}`,
-        "Idempotency-Key": `idemp-big-${crypto.randomUUID()}`,
-        "Content-Type": `multipart/form-data; boundary=${bigBoundary}`,
-      },
+      headers: buildE2ERequestHeaders({
+        clientIp: ordinaryClientIp,
+        authorization: `Bearer ${plaintextKey}`,
+        idempotencyKey: `idemp-big-${crypto.randomUUID()}`,
+        contentType: `multipart/form-data; boundary=${bigBoundary}`,
+      }),
       body: new Uint8Array(bigBody),
     });
     if (bigRes.status !== 413) throw new Error("Expected 413 for oversized file.");
 
     console.log("✅ Step 7 OK: Validation, fit gating, corrupt bytes, unsupported formats, and 413 payload limits verified.");
 
-    // 8. Real HTTP IP Rate-Limit Exhaustion Test (120 req / 60s sliding window)
+    // 8. Real HTTP IP Rate-Limit Exhaustion Test (120 req / 60s sliding window on floodClientIp)
     console.log("\n[Step 8] Testing real HTTP IP rate-limit exhaustion (429 RATE_LIMITED)...");
 
-    // Send unauthenticated requests in sequential batches until quota (120 req / 60s) is exhausted
+    // Send unauthenticated requests in sequential batches on floodClientIp until quota (120 req / 60s) is exhausted
     let rateLimitedRes: Response | null = null;
     const totalFloodRequests = 140;
     const batchSize = 25;
@@ -523,10 +542,10 @@ export async function runHttpE2E(): Promise<void> {
       const batchPromises = Array.from({ length: currentBatchCount }).map(() =>
         fetch(`${targetOrigin}/v1/images/transform`, {
           method: "POST",
-          headers: {
-            "x-forwarded-for": isolatedFloodIp,
-            Authorization: "Bearer img_live_invalidkeyforflood1234567890",
-          },
+          headers: buildE2ERequestHeaders({
+            clientIp: floodClientIp,
+            authorization: "Bearer img_live_invalidkeyforflood1234567890",
+          }),
         })
       );
       const responses = await Promise.all(batchPromises);
@@ -542,10 +561,10 @@ export async function runHttpE2E(): Promise<void> {
     if (!rateLimitedRes) {
       const finalAttempt = await fetch(`${targetOrigin}/v1/images/transform`, {
         method: "POST",
-        headers: {
-          "x-forwarded-for": isolatedFloodIp,
-          Authorization: "Bearer img_live_invalidkeyforflood1234567890",
-        },
+        headers: buildE2ERequestHeaders({
+          clientIp: floodClientIp,
+          authorization: "Bearer img_live_invalidkeyforflood1234567890",
+        }),
       });
       if (finalAttempt.status === 429) {
         rateLimitedRes = finalAttempt;
@@ -630,7 +649,7 @@ export async function runHttpE2E(): Promise<void> {
     }
 
     try {
-      // 2. Best-effort reset of all registered Redis rate limiter tokens via official API
+      // 2. Best-effort reset of all 3 registered Redis rate limiter tokens via official API
       const redisResults = await Promise.allSettled(
         trackedCleanups.map((item) => item.limiter.resetUsedTokens(item.identifier))
       );
