@@ -24,10 +24,17 @@
   - Atomic PostgreSQL `usage_events` recording with `ON CONFLICT (request_id) DO NOTHING` serialization and `409 DUPLICATE_REQUEST` rejection.
   - Zero billable usage on client disconnects and pipeline failure paths.
 
-- [ ] **Milestone 3: Developer Dashboard for Keys and Usage**
-  - Real-time usage event stream visualization.
-  - Filter by date range, API key, and endpoint status.
-  - Usage aggregations and quota summaries.
+- [x] **Milestone 3: Developer Dashboard for Keys and Usage**
+  - Server-only usage analytics service (`src/lib/services/usage-analytics.ts`) strictly scoped by verified `organization_id`.
+  - Pure client-safe DTO module (`src/types/usage.ts`) with zero database/auth/node dependencies.
+  - Interactive URL searchParams filter normalization with preset ranges (`24h`, `7d`, `30d`, `month`, `custom` up to 90 days), API key filter, endpoint, and status code.
+  - Deterministic time-series bucketing in UTC (hourly for <=48h, daily for >48h) with zero-filled missing buckets.
+  - Truthful unconfigured monthly quota reporting (`No quota configured`).
+  - Per-API-key usage breakdown with proportion calculation and masked prefix display (`img_live_ab12cd34••••••••`).
+  - Append-only transformation event log with deterministic cursor-based pagination ordered by `created_at DESC, id DESC`.
+  - Accessible SVG/CSS data visualization with accessible screen reader data tables.
+  - Tab-visibility-aware auto-refresh (~30s) and manual refresh transitions.
+  - Updated Overview page (`/dashboard`) with live monthly consumption volume, active credentials, and links to `/dashboard/usage`.
 
 - [ ] **Milestone 4: Rate Limiting & Abuse Protection**
   - Token bucket / sliding window rate limiting.

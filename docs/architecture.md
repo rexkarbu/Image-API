@@ -141,14 +141,43 @@
 
 ---
 
-## 6. Runtime & Infrastructure Requirements
+## 6. Developer Dashboard & Usage Analytics Architecture (Milestone 3)
+
+### Server-Only Tenant Analytics
+- Built in `src/lib/services/usage-analytics.ts` with explicit `import "server-only";` enforcement.
+- Enforces strict tenant isolation: every query is scoped by `organization_id` derived exclusively from `requireOrganizationContext()`.
+- Parallel query execution (`Promise.all`) fetching period totals, current month volume, active API keys, latest event timestamps, UTC time series, and per-key breakdowns.
+
+### Client-Safe Data Transfer Objects (DTOs)
+- Centralized in `src/types/usage.ts` with zero database, authentication, or Node.js imports.
+- Plain JavaScript objects containing stringified ISO timestamps in UTC.
+- Key secrets and key hashes are strictly scrubbed, exposing only non-sensitive masked prefixes (`img_live_ab12cd34••••••••`).
+
+### Date Range Normalization & Deterministic Bucketing
+- Filter logic in `src/lib/validations/usage-filters.ts` normalizes URL search parameters into UTC timestamps with inclusive starts and exclusive ends.
+- Preset ranges supported: `24h`, `7d`, `30d`, `month` (calendar month-to-date), and `custom` (up to 90 days).
+- Deterministic bucketing: Hourly intervals for spans <= 48 hours, daily intervals for spans > 48 hours.
+- Missing time intervals are filled with 0 units in memory to guarantee continuous time-series visualization.
+
+### Deterministic Cursor-Based Pagination
+- Events queries are stably sorted by `usage_events.created_at DESC, usage_events.id DESC`.
+- Opaque pagination cursor encodes `{ createdAt, id }` in Base64URL format.
+- Queries with a cursor apply `(created_at < cursor.createdAt) OR (created_at = cursor.createdAt AND id < cursor.id)`, eliminating duplicate or skipped rows.
+
+### Truthful Quota Architecture
+- Returns an unconfigured quota object (`configured: false`, `allowedMonthlyUnits: null`, `percentUsed: null`).
+- Renders "No quota configured" in UI without fabricating hypothetical quotas or synthetic progress bars.
+
+---
+
+## 7. Runtime & Infrastructure Requirements
 
 - **Node.js Runtime**: Authentication routes, database connection pool, and image transformation routes explicitly declare `runtime = "nodejs"` to leverage native Node.js buffer, cryptographic primitives, and Sharp native binaries.
 - **Database Pooling**: Standard `pg.Pool` connection pooling compatible with any standard PostgreSQL instance or pooled cloud proxy.
 
 ---
 
-## 7. Data Retention & Foreign-Key Delete Semantics
+## 8. Data Retention & Foreign-Key Delete Semantics
 
 To prevent accidental data loss and maintain an untampered audit history:
 - **Better Auth Tables (`session`, `account`)**: `ON DELETE CASCADE` when the parent `user` is deleted.

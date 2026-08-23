@@ -68,3 +68,11 @@
     - Request IDs in `usage_events` are derived as `SHA-256(organizationId + "\0" + rawIdempotencyKey)`, guaranteeing that raw client idempotency keys are never persisted or exposed in database records or logs.
     - Usage events are inserted atomically with `ON CONFLICT (request_id) DO NOTHING`. Losing duplicate requests immediately receive `409 DUPLICATE_REQUEST` without recording additional units.
     - Usage is recorded only after successful image processing and confirming client connection integrity, ensuring zero billable events on failure paths.
+
+15. **Developer Dashboard Architecture & Zero-Fabrication Usage Analytics (Milestone 3)**
+    - Multi-Tenant Analytics Isolation: All analytics and overview metrics are strictly executed via server-only services (`src/lib/services/usage-analytics.ts`) with mandatory `organization_id` predicates resolved from verified session context.
+    - Pure DTO Separation: The client layer receives purely serializable DTOs (`src/types/usage.ts`) containing zero Node.js/database dependencies, sanitized of all sensitive credentials and internal key hashes.
+    - Deterministic Time-Series Bucketing: Time boundaries are evaluated strictly in UTC. Ranges <= 48 hours use hourly buckets, while ranges > 48 hours use daily buckets (custom range capped at 90 days). Missing time buckets are zero-filled to prevent misleading trend distortions.
+    - Stable Cursor Pagination: Event stream pagination orders deterministically by `created_at DESC, id DESC` using opaque Base64URL cursor tokens (`createdAt_id`) to ensure zero duplicated or skipped rows across identical millisecond timestamps.
+    - Truthful Quota State: Quotas are represented as explicitly unconfigured (`configured: false, allowedMonthlyUnits: null`) and rendered as "No quota configured", strictly forbidding synthetic quotas or fabricated progress indicators.
+    - Tab-Visibility Auto-Refresh: Real-time dashboard synchronization polls at ~30s intervals only when `document.visibilityState === "visible"` to prevent idle background resource drain.

@@ -26,7 +26,15 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 - Atomic append-only `usage_events` metering with PostgreSQL `ON CONFLICT (request_id) DO NOTHING` serialization: exactly 1 billable unit recorded only after successful transformation, returning 409 `DUPLICATE_REQUEST` on key reuse.
 - Zero usage recorded on all failure paths (auth errors, invalid options, unsupported input, corrupt files).
 
-*Milestone 3 (Developer Dashboard for Keys and Usage) is scheduled next.*
+**Milestone 3 — Developer Dashboard for Keys and Usage** (Completed)
+- Server-only tenant analytics service (`src/lib/services/usage-analytics.ts`) enforcing strict `organization_id` scoping and UTC time-series bucketing.
+- Dedicated usage dashboard page (`/dashboard/usage`) with real-time summary cards, interactive URL filters (24h, 7d, 30d, month, custom date range, API key, endpoint, status code), and tab-visibility auto-refresh (~30s).
+- Accessible time-series data visualization with nonvisual table/summary fallback.
+- Per-API-key usage breakdown with proportion calculation and masked prefix display.
+- Append-only transformation event log with deterministic cursor-based pagination.
+- Updated overview page (`/dashboard`) with live monthly consumption volume, active credentials, and truthful unconfigured quota state ("No quota configured").
+
+*Milestone 4 (Rate Limiting & Abuse Protection) is scheduled next.*
 
 ---
 
@@ -116,8 +124,8 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (129 tests).
-- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (21 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite (181 tests).
+- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (22 tests).
 - `pnpm verify:http`: Runs real HTTP E2E verification of `POST /v1/images/transform` against running server.
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.
 - `pnpm db:check`: Checks Drizzle schema snapshot consistency.

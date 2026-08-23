@@ -9,6 +9,7 @@ import {
   rotateApiKey,
   verifyApiKey,
 } from "@/lib/services/api-keys";
+import { getUsageDashboardData, getOverviewStats } from "@/lib/services/usage-analytics";
 import { POST as transformRoute } from "@/app/v1/images/transform/route";
 import { deriveRequestId } from "@/lib/api/idempotency";
 import sharp from "sharp";
@@ -893,5 +894,133 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
     for (const r of orgBRows) {
       expect(r.organizationId).toBe(orgBId);
     }
+  });
+
+  it("verifies live M3 usage analytics service: aggregation, cross-tenant isolation, breakdown, and cursor pagination", async () => {
+    const contextA = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const contextB = { organizationId: orgBId, userId: userBId, role: "owner" };
+
+    // Create 2 keys for Org A, 1 key for Org B
+    const keyA1 = await createApiKey(contextA, { name: "Key A1 Main", scopes: "image:transform" });
+    const keyA2 = await createApiKey(contextA, { name: "Key A2 Backup", scopes: "image:transform" });
+    const keyB1 = await createApiKey(contextB, { name: "Key B1 Main", scopes: "image:transform" });
+
+    createdKeyIds.push(keyA1.key.id, keyA2.key.id, keyB1.key.id);
+
+    const now = new Date();
+    const eventTime1 = new Date(now.getTime() - 10 * 60 * 1000); // 10 mins ago
+    const eventTime2 = new Date(now.getTime() - 5 * 60 * 1000); // 5 mins ago
+    const eventTime3 = new Date(now.getTime() - 1 * 60 * 1000); // 1 min ago
+
+    // Insert 3 usage events for Org A (2 on keyA1, 1 on keyA2)
+    const [evtA1, evtA2, evtA3] = await db
+      .insert(usageEvents)
+      .values([
+        {
+          id: crypto.randomUUID(),
+          requestId: crypto.randomBytes(32).toString("hex"),
+          organizationId: orgAId,
+          apiKeyId: keyA1.key.id,
+          endpoint: "/v1/images/transform",
+          units: 1,
+          statusCode: 200,
+          createdAt: eventTime1,
+        },
+        {
+          id: crypto.randomUUID(),
+          requestId: crypto.randomBytes(32).toString("hex"),
+          organizationId: orgAId,
+          apiKeyId: keyA1.key.id,
+          endpoint: "/v1/images/transform",
+          units: 1,
+          statusCode: 200,
+          createdAt: eventTime2,
+        },
+        {
+          id: crypto.randomUUID(),
+          requestId: crypto.randomBytes(32).toString("hex"),
+          organizationId: orgAId,
+          apiKeyId: keyA2.key.id,
+          endpoint: "/v1/images/transform",
+          units: 1,
+          statusCode: 200,
+          createdAt: eventTime3,
+        },
+      ])
+      .returning({ id: usageEvents.id });
+
+    // Insert 2 usage events for Org B on keyB1
+    const [evtB1, evtB2] = await db
+      .insert(usageEvents)
+      .values([
+        {
+          id: crypto.randomUUID(),
+          requestId: crypto.randomBytes(32).toString("hex"),
+          organizationId: orgBId,
+          apiKeyId: keyB1.key.id,
+          endpoint: "/v1/images/transform",
+          units: 1,
+          statusCode: 200,
+          createdAt: eventTime1,
+        },
+        {
+          id: crypto.randomUUID(),
+          requestId: crypto.randomBytes(32).toString("hex"),
+          organizationId: orgBId,
+          apiKeyId: keyB1.key.id,
+          endpoint: "/v1/images/transform",
+          units: 1,
+          statusCode: 200,
+          createdAt: eventTime2,
+        },
+      ])
+      .returning({ id: usageEvents.id });
+
+    createdUsageIds.push(evtA1.id, evtA2.id, evtA3.id, evtB1.id, evtB2.id);
+
+    // 1. Query Org A Dashboard Data
+    const dataA = await getUsageDashboardData({
+      organizationId: orgAId,
+      rawFilters: { range: "24h" },
+      now,
+    });
+
+    expect(dataA.summary.totalUnits).toBeGreaterThanOrEqual(3);
+    expect(dataA.summary.activeKeysCount).toBeGreaterThanOrEqual(2);
+    expect(dataA.summary.quota.configured).toBe(false);
+    expect(dataA.summary.quota.allowedMonthlyUnits).toBeNull();
+
+    // Verify per-key breakdown
+    const keyA1Breakdown = dataA.keyBreakdown.find((k) => k.apiKeyId === keyA1.key.id);
+    const keyA2Breakdown = dataA.keyBreakdown.find((k) => k.apiKeyId === keyA2.key.id);
+    expect(keyA1Breakdown?.units).toBeGreaterThanOrEqual(2);
+    expect(keyA2Breakdown?.units).toBeGreaterThanOrEqual(1);
+
+    // 2. Query with foreign API Key filter: Org A queries with Org B's key
+    const crossTenantFilter = await getUsageDashboardData({
+      organizationId: orgAId,
+      rawFilters: { range: "24h", apiKeyId: keyB1.key.id },
+      now,
+    });
+    expect(crossTenantFilter.summary.totalUnits).toBe(0);
+    expect(crossTenantFilter.eventsPage.events.length).toBe(0);
+
+    // 3. Query Org B Dashboard Data with key filter
+    const dataBFiltered = await getUsageDashboardData({
+      organizationId: orgBId,
+      rawFilters: { range: "24h", apiKeyId: keyB1.key.id },
+      now,
+    });
+    expect(dataBFiltered.summary.totalUnits).toBeGreaterThanOrEqual(2);
+    expect(dataBFiltered.eventsPage.events.length).toBeGreaterThanOrEqual(2);
+    expect(dataBFiltered.eventsPage.events.every((e) => e.apiKeyId === keyB1.key.id)).toBe(true);
+
+    // Verify Org A events do not contain keyB1
+    expect(dataA.eventsPage.events.some((e) => e.apiKeyId === keyB1.key.id)).toBe(false);
+
+    // 4. Test Overview Stats helper
+    const overviewA = await getOverviewStats(orgAId);
+    expect(overviewA.currentMonthUnits).toBeGreaterThanOrEqual(3);
+    expect(overviewA.activeKeysCount).toBeGreaterThanOrEqual(2);
   });
 });
