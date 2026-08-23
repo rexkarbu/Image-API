@@ -31,7 +31,7 @@ const GENERIC_MULTIPART_ERROR = "Malformed multipart request payload.";
 
 /**
  * Parses and validates a streaming multipart/form-data request using Busboy.
- * Enforces file size limits, field count limits, single-promise settlement, stream cleanup,
+ * Enforces file size limits, field count limits, single-promise settlement, stream and listener cleanup,
  * and strict options schema validation.
  */
 export async function parseMultipartRequest(
@@ -76,13 +76,29 @@ export async function parseMultipartRequest(
     let nodeReadable: Readable | null = null;
     let bb: busboy.Busboy | null = null;
 
+    const abortHandler = () => {
+      fail(new ApiError(400, "INVALID_MULTIPART", "Client aborted the request.", requestId));
+    };
+
     const cleanup = () => {
+      // 1. Remove abort event listener from Request signal on every settlement path
+      if (request.signal) {
+        try {
+          request.signal.removeEventListener("abort", abortHandler);
+        } catch {}
+      }
+
+      // 2. Safely unpipe, remove listeners, and destroy bridged Node readable stream
       if (nodeReadable) {
         try {
           if (bb) nodeReadable.unpipe(bb);
+          nodeReadable.removeAllListeners();
+          nodeReadable.on("error", () => {});
           nodeReadable.destroy();
         } catch {}
       }
+
+      // 3. Remove all listeners from Busboy and absorb any trailing cleanup events
       if (bb) {
         try {
           bb.removeAllListeners();
@@ -107,17 +123,13 @@ export async function parseMultipartRequest(
       }
     };
 
-    // Check early abort
+    // Check early abort before attaching listeners
     if (request.signal?.aborted) {
       return fail(new ApiError(400, "INVALID_MULTIPART", "Client aborted the request.", requestId));
     }
 
-    const abortHandler = () => {
-      fail(new ApiError(400, "INVALID_MULTIPART", "Client aborted the request.", requestId));
-    };
-
     if (request.signal) {
-      request.signal.addEventListener("abort", abortHandler, { once: true });
+      request.signal.addEventListener("abort", abortHandler);
     }
 
     try {
@@ -127,6 +139,9 @@ export async function parseMultipartRequest(
           fileSize: MAX_FILE_SIZE,
           files: 1,
           fields: 6,
+          // Busboy emits 'partsLimit' when ++parts === limits.parts.
+          // Therefore, limits.parts: 8 allows exactly 7 parts (6 text fields + 1 file)
+          // and triggers 'partsLimit' upon encountering an 8th part.
           parts: 8,
           fieldSize: 1024,
         },

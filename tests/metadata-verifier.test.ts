@@ -1,90 +1,128 @@
 import { describe, it, expect } from "vitest";
+import {
+  normalizeCheckClause,
+  assertCheckConstraints,
+  REQUIRED_CHECK_CONSTRAINTS,
+} from "@/db/verify-metadata";
 
-describe("Fail-Closed Metadata Verifier Assertion Logic (Pure Unit Tests)", () => {
-  const EXPECTED_TABLES = [
-    "account",
-    "api_keys",
-    "organization_members",
-    "organizations",
-    "session",
-    "usage_events",
-    "user",
-    "verification",
+describe("PostgreSQL Metadata Verifier & Check Constraint Pure Unit Tests", () => {
+  const validCheckRows = [
+    {
+      table_name: "usage_events",
+      constraint_name: "usage_events_units_equals_one",
+      check_clause: "(units = 1)",
+    },
+    {
+      table_name: "usage_events",
+      constraint_name: "usage_events_request_id_format",
+      check_clause: "(request_id ~ '^[0-9a-f]{64}$'::text)",
+    },
+    {
+      table_name: "usage_events",
+      constraint_name: "usage_events_status_code_2xx",
+      check_clause: "((status_code >= 200) AND (status_code <= 299))",
+    },
+    {
+      table_name: "api_key_audit_events",
+      constraint_name: "api_key_audit_events_type_check",
+      check_clause:
+        "(event_type = ANY (ARRAY['created'::text, 'revoked'::text, 'rotation_created'::text, 'expiration_scheduled'::text]))",
+    },
+    {
+      table_name: "api_keys",
+      constraint_name: "api_keys_status_check",
+      check_clause: "(status = ANY (ARRAY['active'::text, 'revoked'::text]))",
+    },
+    {
+      table_name: "api_keys",
+      constraint_name: "api_keys_key_hash_format",
+      check_clause: "(key_hash ~ '^[0-9a-f]{64}$'::text)",
+    },
+    {
+      table_name: "api_keys",
+      constraint_name: "api_keys_key_prefix_format",
+      check_clause: "(key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'::text)",
+    },
+    {
+      table_name: "api_keys",
+      constraint_name: "api_keys_status_revoked_consistency",
+      check_clause:
+        "(((status = 'active'::text) AND (revoked_at IS NULL)) OR ((status = 'revoked'::text) AND (revoked_at IS NOT NULL)))",
+    },
+    {
+      table_name: "api_keys",
+      constraint_name: "api_keys_scopes_check",
+      check_clause: "(scopes = 'image:transform'::text)",
+    },
+    {
+      table_name: "api_keys",
+      constraint_name: "api_keys_expires_at_check",
+      check_clause: "((expires_at IS NULL) OR (expires_at > created_at))",
+    },
   ];
 
-  function assertTables(existingTables: string[]) {
-    const missingTables = EXPECTED_TABLES.filter((t) => !existingTables.includes(t));
-    if (missingTables.length > 0) {
-      throw new Error(`Metadata Assertion Failed: Missing required tables: [${missingTables.join(", ")}]`);
-    }
-  }
-
-  function assertPlaintextColumns(columns: { column_name: string }[]) {
-    const suspicious = columns.find((c) =>
-      ["key", "api_key", "secret", "token", "plaintext"].includes(c.column_name.toLowerCase())
-    );
-    if (suspicious) {
-      throw new Error(`Metadata Assertion Failed: Plaintext key column '${suspicious.column_name}' detected!`);
-    }
-  }
-
-  function assertForeignKeyDeleteRules(
-    fks: { table_name: string; column_name: string; foreign_table_name: string; foreign_column_name: string; delete_rule: string }[]
-  ) {
-    const requiredFk = {
-      table: "organization_members",
-      column: "organization_id",
-      foreignTable: "organizations",
-      foreignColumn: "id",
-      deleteRule: "CASCADE",
-    };
-    const match = fks.find(
-      (r) =>
-        r.table_name === requiredFk.table &&
-        r.column_name === requiredFk.column &&
-        r.foreign_table_name === requiredFk.foreignTable &&
-        r.foreign_column_name === requiredFk.foreignColumn
-    );
-    if (!match) {
-      throw new Error("Metadata Assertion Failed: Missing required FK");
-    }
-    if (match.delete_rule !== requiredFk.deleteRule) {
-      throw new Error(`Metadata Assertion Failed: FK has delete rule '${match.delete_rule}', expected '${requiredFk.deleteRule}'`);
-    }
-  }
-
-  it("passes when all expected tables exist", () => {
-    expect(() => assertTables([...EXPECTED_TABLES, "extra_future_table"])).not.toThrow();
+  it("normalizes PostgreSQL check clause formatting and whitespace", () => {
+    const raw = "(((status = 'active'::text) AND (revoked_at IS NULL)))";
+    const normalized = normalizeCheckClause(raw);
+    expect(normalized).toBe("status = 'active' AND revoked_at IS NULL");
   });
 
-  it("fails closed when an expected table is missing", () => {
-    const incompleteTables = EXPECTED_TABLES.filter((t) => t !== "usage_events");
-    expect(() => assertTables(incompleteTables)).toThrow(
-      "Metadata Assertion Failed: Missing required tables: [usage_events]"
+  it("passes when all exact check constraints with valid expressions are provided", () => {
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, validCheckRows)).not.toThrow();
+  });
+
+  it("fails when api_keys_expires_at_check contains ONLY expires_at IS NULL", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_keys_expires_at_check"
+        ? { ...r, check_clause: "(expires_at IS NULL)" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'api_keys_expires_at_check' failed semantic validation/
     );
   });
 
-  it("fails closed when a suspicious plaintext column is present in api_keys", () => {
-    const cols = [
-      { column_name: "id" },
-      { column_name: "key_hash" },
-      { column_name: "api_key" }, // suspicious
-    ];
-    expect(() => assertPlaintextColumns(cols)).toThrow(
-      "Metadata Assertion Failed: Plaintext key column 'api_key' detected!"
+  it("fails when api_keys_expires_at_check contains ONLY expires_at > created_at", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_keys_expires_at_check"
+        ? { ...r, check_clause: "(expires_at > created_at)" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'api_keys_expires_at_check' failed semantic validation/
     );
   });
 
-  it("fails closed when foreign key delete rule is wrong (e.g. SET NULL instead of CASCADE)", () => {
-    const fks = [
-      {
-        table_name: "organization_members",
-        column_name: "organization_id",
-        foreign_table_name: "organizations",
-        foreign_column_name: "id",
-        delete_rule: "SET NULL", // invalid
-      },
-    ];
-    expect(() => assertForeignKeyDeleteRules(fks)).toThrow(/expected 'CASCADE'/);
+  it("fails when a constraint has correct clause but wrong constraint name", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_keys_expires_at_check"
+        ? { ...r, constraint_name: "wrong_constraint_name" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Missing exact check constraint 'api_keys_expires_at_check'/
+    );
+  });
+
+  it("fails when an enum check constraint is missing a required member", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "api_key_audit_events_type_check"
+        ? { ...r, check_clause: "(event_type = ANY (ARRAY['created'::text, 'revoked'::text]))" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'api_key_audit_events_type_check' failed semantic validation/
+    );
+  });
+
+  it("fails when usage_events_status_code_2xx is missing upper or lower bound", () => {
+    const badRows = validCheckRows.map((r) =>
+      r.constraint_name === "usage_events_status_code_2xx"
+        ? { ...r, check_clause: "(status_code >= 200)" }
+        : r
+    );
+    expect(() => assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, badRows)).toThrow(
+      /Check constraint 'usage_events_status_code_2xx' failed semantic validation/
+    );
   });
 });

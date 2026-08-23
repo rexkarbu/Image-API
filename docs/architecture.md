@@ -95,13 +95,13 @@
   - The raw user idempotency key is never persisted or logged.
 - **Streaming Multipart Parser**:
   - Uses `busboy` on incoming request streams with zero temporary disk writes and explicit stream listener lifecycle cleanup.
-  - Limits: max file size `10 MiB`, max fields `6`, max parts `7`, max field size `1024` bytes.
+  - Limits: max file size `10 MiB`, max text fields `6`, max files `1`, max accepted parts `7` (configured with `limits.parts: 8` as the sentinel to reject the 8th part when `++parts === limits.parts`), max field size `1024` bytes.
   - Validates options and rejects unknown/duplicate fields.
   - An explicitly supplied `fit` parameter is rejected with `400 INVALID_OPTIONS` unless both `width` and `height` dimensions are provided.
   - Rejects explicit `quality` parameter when `format = "png"` (PNG uses lossless compression).
 - **Sharp Processing Sandboxing**:
   - Configured with `failOn: "warning"`, `limitInputPixels: 40_000_000`, `limitInputChannels: 4`, `pages: 1`, `animated: false`, and a 20-second timeout (`.timeout({ seconds: 20 })`).
-  - Allowed input formats: `jpeg`, `png`, `webp` (rejects SVG, GIF, TIFF, PDF, AVIF, and animated WebP).
+  - Allowed input formats: `jpeg`, `png`, `webp` (rejects SVG, GIF, TIFF, PDF, AVIF input, and animated WebP).
   - Automatically strips all EXIF, GPS, XMP, and IPTC metadata.
   - Auto-orients based on EXIF (`.rotate()`) prior to resizing.
   - Flattens transparent alpha channels over solid white when converting to JPEG.
@@ -112,6 +112,12 @@
   - Writes to `usage_events` with `units = 1`, `status_code = 200`, `endpoint = "/v1/images/transform"`.
   - Uses PostgreSQL `ON CONFLICT (request_id) DO NOTHING` to serialize concurrent requests: losing requests receive `409 DUPLICATE_REQUEST` without recording additional usage units.
   - All failure paths (400, 401, 413, 415, 422, 500, 503) create **zero** usage event rows.
+
+### Verification Tiers
+- **Unit Tests**: Pure logic assertions for crypto, tokens, options parsing, 7-part/8-part boundary enforcement, abort listener removal, EXIF/XMP/GPS stripping, PDF gating, and route orchestration error boundaries (500/503/409/422).
+- **Live Database Integration Tests**: Live Neon PostgreSQL tests for tenant scoping, key rotation (immediate/grace), constraint validation, concurrent conflict handling, and usage recording.
+- **Real HTTP Server Verification**: Full end-to-end loopback HTTP runs against the Next.js server for binary headers, real duplicate rejections, uniform 401 payloads, and zero billable usage guarantees.
+- **GitHub CI**: Not configured; all validations are executed locally in the development environment.
 
 ---
 

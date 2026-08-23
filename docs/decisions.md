@@ -59,6 +59,7 @@
     - Metadata stripping: All EXIF, GPS, XMP, and IPTC metadata are stripped by default on all outputs. Auto-orientation (`.rotate()`) is applied prior to metadata removal.
     - PNG quality handling: PNG uses lossless compression; explicitly supplying a `quality` parameter for PNG output is rejected with `400 INVALID_OPTIONS` rather than pretending lossy compression applies.
     - Fit parameter validation: Supplying `fit` requires both `width` and `height` dimensions to prevent ambiguous resizing behavior.
+    - Multipart boundary limits: Accepts up to 7 total parts (1 file + 6 fields) and triggers rejection on the 8th part boundary using `limits.parts: 8`.
     - Transparent JPEG flattening: Converting transparent PNG or WebP images to JPEG automatically flattens alpha channels against solid white.
 
 14. **Idempotent Request-Path Usage Metering & Indistinguishable Authentication (Milestone 2 & M2.1)**

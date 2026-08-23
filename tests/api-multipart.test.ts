@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseMultipartRequest } from "@/lib/api/multipart";
 import { ApiError } from "@/lib/api/errors";
-import { Readable } from "node:stream";
 import sharp from "sharp";
 
 async function createDummyImage(): Promise<Buffer> {
@@ -21,7 +20,8 @@ function buildMultipartRequest(
   fields: Record<string, string | null>,
   fileBuffer?: Buffer,
   fileName = "test.png",
-  fieldName = "file"
+  fieldName = "file",
+  signal?: AbortSignal
 ): Request {
   const boundary = "---------------------------974767299852498929531610575";
   const chunks: Buffer[] = [];
@@ -49,14 +49,18 @@ function buildMultipartRequest(
   chunks.push(Buffer.from(`--${boundary}--\r\n`));
   const fullBody = Buffer.concat(chunks);
 
-  return new Request("http://localhost:3000/v1/images/transform", {
+  const init: RequestInit & { duplex?: "half" } = {
     method: "POST",
     headers: {
       "Content-Type": `multipart/form-data; boundary=${boundary}`,
       "Content-Length": String(fullBody.length),
     },
     body: fullBody,
-  });
+    signal,
+    duplex: "half",
+  };
+
+  return new Request("http://localhost:3000/v1/images/transform", init);
 }
 
 describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
@@ -75,8 +79,9 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     expect(parsed.options.withoutEnlargement).toBe(true);
   });
 
-  it("parses explicit valid options with both dimensions and fit", async () => {
+  it("accepts exactly one file plus six valid fields (7 total accepted parts)", async () => {
     const dummy = await createDummyImage();
+    // 6 text fields + 1 file = 7 total parts
     const req = buildMultipartRequest(
       {
         width: "500",
@@ -96,6 +101,141 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     expect(parsed.options.quality).toBe(90);
     expect(parsed.options.fit).toBe("cover");
     expect(parsed.options.withoutEnlargement).toBe(false);
+  });
+
+  it("rejects an eighth multipart part with 400 INVALID_MULTIPART", async () => {
+    const dummy = await createDummyImage();
+    const boundary = "---------------------------974767299852498929531610575";
+    // 6 text fields + 1 file + 1 extra field = 8 parts
+    const chunks: Buffer[] = [
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="width"\r\n\r\n100\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="height"\r\n\r\n100\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="format"\r\n\r\nwebp\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="quality"\r\n\r\n80\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="fit"\r\n\r\ninside\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="withoutEnlargement"\r\n\r\ntrue\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="test.png"\r\nContent-Type: image/png\r\n\r\n`),
+      dummy,
+      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="extraField"\r\n\r\nextra\r\n`),
+      Buffer.from(`--${boundary}--\r\n`),
+    ];
+
+    const fullBody = Buffer.concat(chunks);
+    const req = new Request("http://localhost:3000/v1/images/transform", {
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      body: fullBody,
+    });
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_MULTIPART");
+      expect(["Exceeded maximum number of multipart parts.", "Exceeded maximum number of multipart fields."]).toContain(err.message);
+    }
+  });
+
+  it("removes abort listener from request signal after successful parse", async () => {
+    const controller = new AbortController();
+    const dummy = await createDummyImage();
+    const req = buildMultipartRequest({}, dummy, "test.png", "file", controller.signal);
+
+    await parseMultipartRequest(req, reqId);
+
+    // If abort fires after completion, nothing should throw or handle
+    expect(() => controller.abort()).not.toThrow();
+  });
+
+  it("removes abort listener from request signal after parser failure", async () => {
+    const controller = new AbortController();
+    const req = buildMultipartRequest({ width: "not-a-number" }, undefined, "test.png", "file", controller.signal);
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+    }
+
+    // If abort fires after failure, no secondary rejection occurs
+    expect(() => controller.abort()).not.toThrow();
+  });
+
+  it("handles request abort occurring after parsing has started", async () => {
+    const controller = new AbortController();
+    const boundary = "---------------------------974767299852498929531610575";
+
+    // Streaming body that aborts while streaming chunks
+    const stream = new ReadableStream({
+      start(ctrl) {
+        ctrl.enqueue(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="width"\r\n\r\n200\r\n`));
+        // Trigger abort mid-stream
+        setTimeout(() => {
+          controller.abort();
+        }, 10);
+      },
+    });
+
+    const init: RequestInit & { duplex?: "half" } = {
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      body: stream,
+      signal: controller.signal,
+      duplex: "half",
+    };
+
+    const req = new Request("http://localhost:3000/v1/images/transform", init);
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_MULTIPART");
+      expect(err.message).toBe("Client aborted the request.");
+    }
+  });
+
+  it("handles source ReadableStream error after parsing begins cleanly without unhandled stream error", async () => {
+    const boundary = "---------------------------974767299852498929531610575";
+
+    // Stream that errors after first chunk
+    const errorStream = new ReadableStream({
+      start(ctrl) {
+        ctrl.enqueue(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="width"\r\n\r\n200\r\n`));
+        setTimeout(() => {
+          ctrl.error(new Error("Underlying TCP connection reset by peer"));
+        }, 10);
+      },
+    });
+
+    const init: RequestInit & { duplex?: "half" } = {
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      body: errorStream,
+      duplex: "half",
+    };
+
+    const req = new Request("http://localhost:3000/v1/images/transform", init);
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_MULTIPART");
+      expect(err.message).toBe("Malformed multipart request payload.");
+      expect(err.message).not.toContain("TCP");
+      expect(err.message).not.toContain("reset");
+    }
   });
 
   it("rejects non-multipart Content-Type with 400 INVALID_MULTIPART", async () => {
@@ -288,38 +428,6 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
       expect(err.statusCode).toBe(400);
       expect(err.code).toBe("INVALID_MULTIPART");
       expect(err.message).not.toContain("busboy");
-    }
-  });
-
-  it("handles request abort signal during stream parsing", async () => {
-    const controller = new AbortController();
-    const dummy = await createDummyImage();
-
-    // Create a slow readable stream
-    const slowStream = new ReadableStream({
-      start(ctrl) {
-        ctrl.enqueue(Buffer.from("-----------------------------974767299852498929531610575\r\n"));
-        // Abort immediately
-        controller.abort();
-      },
-    });
-
-    const req = new Request("http://localhost:3000/v1/images/transform", {
-      method: "POST",
-      headers: { "Content-Type": "multipart/form-data; boundary=---------------------------974767299852498929531610575" },
-      body: slowStream,
-      signal: controller.signal,
-      // @ts-ignore
-      duplex: "half",
-    });
-
-    try {
-      await parseMultipartRequest(req, reqId);
-      expect.fail("Should have thrown");
-    } catch (err: any) {
-      expect(err.statusCode).toBe(400);
-      expect(err.code).toBe("INVALID_MULTIPART");
-      expect(err.message).toBe("Client aborted the request.");
     }
   });
 });

@@ -12,18 +12,18 @@ const ALLOWED_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"
 
 /**
  * Strictly validates the HTTP E2E target base URL before making any network calls or database writes.
- * Rejects remote origins, URL credentials, and non-loopback hosts fail-closed.
+ * Rejects remote origins, URL credentials, path prefixes, query strings, and fragments fail-closed.
  */
 function validateTargetOrigin(rawUrl: string): string {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Error(`Invalid HTTP_E2E_BASE_URL: '${rawUrl}'. Must be a valid URL.`);
+    throw new Error("Invalid HTTP_E2E_BASE_URL configured. Must be a valid absolute URL.");
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`Invalid protocol '${parsed.protocol}'. Only http: and https: are allowed.`);
+    throw new Error("Invalid protocol in HTTP_E2E_BASE_URL. Only http: and https: are allowed.");
   }
 
   if (parsed.username || parsed.password) {
@@ -31,13 +31,17 @@ function validateTargetOrigin(rawUrl: string): string {
   }
 
   if (parsed.pathname && parsed.pathname !== "/") {
-    throw new Error(`HTTP_E2E_BASE_URL must not contain a path component (got '${parsed.pathname}').`);
+    throw new Error("HTTP_E2E_BASE_URL must not contain a path component.");
+  }
+
+  if (parsed.search || parsed.hash) {
+    throw new Error("HTTP_E2E_BASE_URL must not contain query parameters or URL fragments.");
   }
 
   const hostname = parsed.hostname.toLowerCase();
   if (!ALLOWED_LOOPBACK_HOSTS.has(hostname)) {
     throw new Error(
-      `Security Violation: Target host '${hostname}' is not a permitted loopback origin. Real HTTP E2E tests must only target local development servers.`
+      "Security Violation: Target host is not a permitted loopback origin. Real HTTP E2E tests must only target local development servers."
     );
   }
 
@@ -96,6 +100,7 @@ async function runHttpE2E() {
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     max: 2,
+    connectionTimeoutMillis: 25000,
   });
 
   const testId = crypto.randomUUID().slice(0, 8);
@@ -170,7 +175,7 @@ async function runHttpE2E() {
       [revokedKeyId, testOrgId, testUserId, revokedPrefix, revokedHash, now, older]
     );
 
-    // Expired key
+    // Expired key (created_at older than expires_at to satisfy check constraint)
     await pool.query(
       `INSERT INTO "api_keys" (id, name, organization_id, created_by_user_id, status, scopes, key_prefix, key_hash, expires_at, created_at, updated_at)
        VALUES ($1, 'HTTP E2E Expired Key', $2, $3, 'active', 'image:transform', $4, $5, $6, $7, $7)`,
@@ -205,8 +210,7 @@ async function runHttpE2E() {
     });
 
     if (response.status !== 200) {
-      const errText = await response.text();
-      throw new Error(`Expected HTTP 200 but received ${response.status}: ${errText}`);
+      throw new Error(`Expected HTTP 200 but received status ${response.status}`);
     }
 
     const contentType = response.headers.get("content-type");
@@ -215,17 +219,17 @@ async function runHttpE2E() {
     const outHeight = response.headers.get("x-image-height");
     const requestIdHeader = response.headers.get("x-request-id");
 
-    if (contentType !== "image/webp") throw new Error(`Unexpected Content-Type: ${contentType}`);
-    if (usageUnits !== "1") throw new Error(`Unexpected X-Usage-Units: ${usageUnits}`);
+    if (contentType !== "image/webp") throw new Error("Unexpected Content-Type in HTTP response.");
+    if (usageUnits !== "1") throw new Error("Unexpected X-Usage-Units in HTTP response.");
     if (outWidth !== "80" || outHeight !== "50") {
-      throw new Error(`Unexpected output dimensions: ${outWidth}x${outHeight}`);
+      throw new Error("Unexpected output dimensions in HTTP response headers.");
     }
     if (!requestIdHeader) throw new Error("Missing X-Request-ID response header.");
 
     const outputBinary = Buffer.from(await response.arrayBuffer());
     const outputMeta = await sharp(outputBinary).metadata();
     if (outputMeta.format !== "webp" || outputMeta.width !== 80 || outputMeta.height !== 50) {
-      throw new Error(`Transformed binary verification failed: format=${outputMeta.format} dimensions=${outputMeta.width}x${outputMeta.height}`);
+      throw new Error("Transformed binary verification failed against expected format and dimensions.");
     }
     console.log(`✅ Step 2 OK: HTTP 200 binary response verified (Format: ${outputMeta.format}, Dimensions: ${outputMeta.width}x${outputMeta.height}, Units: 1).`);
 
@@ -266,7 +270,7 @@ async function runHttpE2E() {
 
     const dupBody = await dupResponse.json();
     if (dupBody.error?.code !== "DUPLICATE_REQUEST") {
-      throw new Error(`Expected error code DUPLICATE_REQUEST, got ${dupBody.error?.code}`);
+      throw new Error("Expected error code DUPLICATE_REQUEST in response body.");
     }
     console.log("✅ Step 4 OK: HTTP 409 DUPLICATE_REQUEST returned.");
 
@@ -351,6 +355,13 @@ async function runHttpE2E() {
       { name: "Expired Key", headers: { Authorization: `Bearer ${plaintextExpiredKey}` } },
     ];
 
+    const expectedAuthPayload = {
+      error: {
+        code: "UNAUTHORIZED",
+        message: "Invalid API credentials.",
+      },
+    };
+
     for (const testCase of authTestCases) {
       const authRes = await fetch(`${targetOrigin}/v1/images/transform`, {
         method: "POST",
@@ -367,10 +378,15 @@ async function runHttpE2E() {
       }
 
       const resJson = await authRes.json();
-      if (resJson.error?.code !== "UNAUTHORIZED" || resJson.error?.message !== "Invalid API credentials.") {
-        throw new Error(
-          `Rejection body not uniform for '${testCase.name}': code=${resJson.error?.code} message=${resJson.error?.message}`
-        );
+      const normalizedPayload = {
+        error: {
+          code: resJson.error?.code,
+          message: resJson.error?.message,
+        },
+      };
+
+      if (JSON.stringify(normalizedPayload) !== JSON.stringify(expectedAuthPayload) || typeof resJson.error?.requestId !== "string") {
+        throw new Error(`Rejection body not uniform for '${testCase.name}'`);
       }
     }
     console.log("✅ Step 6 OK: All 6 authentication failure cases returned identical 401 UNAUTHORIZED responses.");
@@ -470,9 +486,9 @@ async function runHttpE2E() {
     console.log("\n==================================================");
     console.log("🎉 ALL REAL HTTP TRANSFORMATION & METERING CHECKS PASSED!");
     console.log("==================================================");
-  } catch (err) {
-    runError = err as Error;
-    console.error("❌ HTTP E2E Verification Failed:", (err as Error).message || err);
+  } catch (err: any) {
+    runError = new Error("HTTP E2E Verification failed during test execution.");
+    console.error(`❌ HTTP E2E Verification Failed: operation=runHttpE2E runId=${testId} reason=${err?.message || "unknown"}`);
     process.exitCode = 1;
   } finally {
     console.log("\n🧹 Cleaning up test fixtures...");
@@ -493,8 +509,8 @@ async function runHttpE2E() {
       }
       await pool.query(`DELETE FROM "user" WHERE id = $1`, [testUserId]);
       console.log("✅ Fixture cleanup complete.");
-    } catch (cleanErr) {
-      console.error("⚠️ Cleanup failed for test run:", (cleanErr as Error).message || cleanErr);
+    } catch {
+      console.error(`⚠️ Cleanup failed for test run: operation=cleanupFixtures runId=${testId}`);
       process.exitCode = 1;
     } finally {
       await pool.end();

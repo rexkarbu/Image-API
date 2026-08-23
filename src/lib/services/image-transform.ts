@@ -1,3 +1,5 @@
+import "server-only";
+
 import sharp, { type Metadata, type SharpOptions } from "sharp";
 import { ImageTransformOptions, OutputFormat } from "@/lib/api/multipart";
 import { ApiError } from "@/lib/api/errors";
@@ -40,6 +42,16 @@ export async function transformImage(
   options: ImageTransformOptions,
   requestId: string
 ): Promise<TransformResult> {
+  // Reject recognized non-image file signatures like PDF fail-closed
+  if (inputBuffer.length >= 4 && inputBuffer.subarray(0, 4).toString("ascii") === "%PDF") {
+    throw new ApiError(
+      415,
+      "UNSUPPORTED_IMAGE_TYPE",
+      "Unsupported image format 'pdf'. Only JPEG, PNG, and WebP inputs are accepted.",
+      requestId
+    );
+  }
+
   // 1. Initial metadata inspection & format gating with shared security options
   let metadata: Metadata;
   try {

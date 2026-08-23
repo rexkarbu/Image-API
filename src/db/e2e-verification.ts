@@ -1,9 +1,8 @@
 import Module from "node:module";
 // Allow standalone Node runner to import server-only modules
-// @ts-ignore
-const originalRequire = Module.prototype.require;
-// @ts-ignore
-Module.prototype.require = function (id: string) {
+const moduleProto = Module.prototype as unknown as { require: (this: unknown, id: string) => unknown };
+const originalRequire = moduleProto.require;
+moduleProto.require = function (this: unknown, id: string) {
   if (id === "server-only") return {};
   return Reflect.apply(originalRequire, this, [id]);
 };

@@ -4,7 +4,6 @@ import {
   SHARP_SECURITY_OPTIONS,
   SHARP_TIMEOUT_SECONDS,
 } from "@/lib/services/image-transform";
-import { ApiError } from "@/lib/api/errors";
 import sharp from "sharp";
 
 describe("Sharp Image Transformation Service Unit Tests", () => {
@@ -243,7 +242,7 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     expect(data[2]).toBe(255);
   });
 
-  it("actually strips verified EXIF, GPS, and XMP metadata from EXIF-bearing input", async () => {
+  it("strips verified EXIF metadata from EXIF-bearing input", async () => {
     // Generate image with confirmed EXIF tags
     const inputWithExif = await sharp({
       create: { width: 50, height: 50, channels: 3, background: { r: 10, g: 20, b: 30 } },
@@ -274,6 +273,76 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     expect(outMeta.exif).toBeUndefined();
     expect(outMeta.iptc).toBeUndefined();
     expect(outMeta.xmp).toBeUndefined();
+  });
+
+  it("strips verified real XMP metadata from an XMP-bearing JPEG input fixture", async () => {
+    // Create authentic JPEG containing XMP APP1 packet
+    const xmpHeader = Buffer.from("http://ns.adobe.com/xap/1.0/\0", "utf8");
+    const xmpXml = Buffer.from(
+      `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title><rdf:Alt><rdf:li xml:lang="x-default">VerifiedXMPPacket</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta>`,
+      "utf8"
+    );
+    const xmpPayload = Buffer.concat([xmpHeader, xmpXml]);
+    const length = xmpPayload.length + 2;
+    const app1Xmp = Buffer.concat([
+      Buffer.from([0xff, 0xe1, (length >> 8) & 0xff, length & 0xff]),
+      xmpPayload,
+    ]);
+
+    const plainJpeg = await generateTestJpeg(50, 50);
+    const jpegWithXmp = Buffer.concat([plainJpeg.subarray(0, 2), app1Xmp, plainJpeg.subarray(2)]);
+
+    // Verify input actually contains XMP before transformation
+    const inMeta = await sharp(jpegWithXmp).metadata();
+    expect(inMeta.xmp).toBeDefined();
+    expect(inMeta.xmp?.length).toBeGreaterThan(0);
+
+    const result = await transformImage(
+      jpegWithXmp,
+      { format: "webp", quality: 80, fit: "inside", withoutEnlargement: true },
+      reqId
+    );
+
+    // Verify output has zero XMP metadata
+    const outMeta = await sharp(Buffer.from(result.buffer)).metadata();
+    expect(outMeta.xmp).toBeUndefined();
+  });
+
+  it("strips verified real GPS-bearing EXIF from a GPS-bearing JPEG input fixture", async () => {
+    // Standard EXIF payload with Tag 0x8825 (GPSInfo) pointing to GPS IFD
+    const gpsExifPayload = Buffer.from([
+      0x45, 0x78, 0x69, 0x66, 0x00, 0x00, // 'Exif\0\0'
+      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // TIFF header (II*, offset 8)
+      0x01, 0x00, // 1 IFD0 tag
+      0x25, 0x88, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, // Tag 0x8825 (GPSInfo), Type LONG, Offset 26
+      0x00, 0x00, 0x00, 0x00, // Next IFD offset
+      0x01, 0x00, // GPS IFD: 1 tag
+      0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00, // GPSVersionID: 2.2.0.0
+      0x00, 0x00, 0x00, 0x00,
+    ]);
+    const gpsLength = gpsExifPayload.length + 2;
+    const gpsApp1 = Buffer.concat([
+      Buffer.from([0xff, 0xe1, (gpsLength >> 8) & 0xff, gpsLength & 0xff]),
+      gpsExifPayload,
+    ]);
+
+    const plainJpeg = await generateTestJpeg(50, 50);
+    const jpegWithGps = Buffer.concat([plainJpeg.subarray(0, 2), gpsApp1, plainJpeg.subarray(2)]);
+
+    // Verify input actually contains EXIF/GPS bytes before transformation
+    const inMeta = await sharp(jpegWithGps).metadata();
+    expect(inMeta.exif).toBeDefined();
+    expect(inMeta.exif?.length).toBeGreaterThan(0);
+
+    const result = await transformImage(
+      jpegWithGps,
+      { format: "png", quality: 80, fit: "inside", withoutEnlargement: true },
+      reqId
+    );
+
+    // Verify output has zero EXIF/GPS metadata
+    const outMeta = await sharp(Buffer.from(result.buffer)).metadata();
+    expect(outMeta.exif).toBeUndefined();
   });
 
   it("auto-orients image based on EXIF orientation before stripping metadata", async () => {
@@ -325,7 +394,26 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     expect(outMeta.orientation).toBeUndefined();
   });
 
-  it("rejects unsupported input formats (SVG, GIF, TIFF, PDF, AVIF input) with 415 UNSUPPORTED_IMAGE_TYPE", async () => {
+  it("rejects PDF input documents with 415 UNSUPPORTED_IMAGE_TYPE", async () => {
+    const pdfBuffer = Buffer.from(
+      "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\nxref\n0 1\n0000000000 65535 f \ntrailer<</Size 1/Root 1 0 R>>\nstartxref\n50\n%%EOF"
+    );
+
+    try {
+      await transformImage(
+        pdfBuffer,
+        { format: "webp", quality: 80, fit: "inside", withoutEnlargement: true },
+        reqId
+      );
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(415);
+      expect(err.code).toBe("UNSUPPORTED_IMAGE_TYPE");
+      expect(err.message).toBe("Unsupported image format 'pdf'. Only JPEG, PNG, and WebP inputs are accepted.");
+    }
+  });
+
+  it("rejects unsupported input formats (SVG, GIF, TIFF, AVIF input) with 415 UNSUPPORTED_IMAGE_TYPE", async () => {
     // SVG
     const svgBuffer = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect width="50" height="50" fill="red"/></svg>');
     try {
@@ -379,7 +467,7 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
     }
   });
 
-  it("rejects corrupt or non-image binary input with 422 UNPROCESSABLE_IMAGE", async () => {
+  it("rejects corrupt or non-image binary input with 422 UNPROCESSABLE_IMAGE without leaking raw parser internals", async () => {
     const corruptBuffer = Buffer.from("this is completely not an image binary data random text");
 
     try {
@@ -393,6 +481,8 @@ describe("Sharp Image Transformation Service Unit Tests", () => {
       expect(err.statusCode).toBe(422);
       expect(err.code).toBe("UNPROCESSABLE_IMAGE");
       expect(err.message).toBe("The uploaded file could not be parsed as a valid image.");
+      expect(err.message).not.toContain("vips");
+      expect(err.message).not.toContain("libvips");
     }
   });
 });

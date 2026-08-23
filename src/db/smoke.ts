@@ -21,14 +21,17 @@ async function smokeTest() {
 
   if (!connectionString) {
     console.error("❌ Database smoke test failed: DATABASE_URL is not set.");
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const pool = new Pool({
     connectionString,
     max: 1,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 25000,
   });
+
+  let runError: Error | null = null;
 
   try {
     console.log("⏳ Connecting to database (runtime pooled connection)...");
@@ -55,11 +58,16 @@ async function smokeTest() {
       console.log(`✅ All ${EXPECTED_TABLES.length} expected application tables verified in database schema.`);
     }
   } catch (error) {
+    runError = error as Error;
     console.error("❌ Database smoke test failed:", (error as Error).message || error);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     await pool.end();
     console.log("🔌 Database connection closed cleanly.");
+  }
+
+  if (runError) {
+    throw runError;
   }
 }
 

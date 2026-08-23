@@ -5,6 +5,125 @@ import { assertDevelopmentDatabaseSafety } from "./development-safety";
 dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
 
+export interface CheckConstraintRule {
+  table: string;
+  name: string;
+  validate: (normalizedClause: string) => boolean;
+  description: string;
+}
+
+export function normalizeCheckClause(clause: string): string {
+  return clause
+    .replace(/::text/g, "")
+    .replace(/::[a-z0-9_]+/gi, "")
+    .replace(/[()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
+  {
+    table: "usage_events",
+    name: "usage_events_units_equals_one",
+    validate: (c) => c.includes("units = 1"),
+    description: "units = 1",
+  },
+  {
+    table: "usage_events",
+    name: "usage_events_request_id_format",
+    validate: (c) => c.includes("^[0-9a-f]{64}$"),
+    description: "request_id ~ '^[0-9a-f]{64}$'",
+  },
+  {
+    table: "usage_events",
+    name: "usage_events_status_code_2xx",
+    validate: (c) =>
+      c.includes("status_code >= 200") &&
+      c.includes("status_code <= 299"),
+    description: "status_code >= 200 AND status_code <= 299",
+  },
+  {
+    table: "api_key_audit_events",
+    name: "api_key_audit_events_type_check",
+    validate: (c) => {
+      const hasAll =
+        c.includes("'created'") &&
+        c.includes("'revoked'") &&
+        c.includes("'rotation_created'") &&
+        c.includes("'expiration_scheduled'");
+      return hasAll && c.includes("event_type");
+    },
+    description: "event_type IN ('created', 'revoked', 'rotation_created', 'expiration_scheduled')",
+  },
+  {
+    table: "api_keys",
+    name: "api_keys_status_check",
+    validate: (c) => {
+      const hasAll = c.includes("'active'") && c.includes("'revoked'");
+      return hasAll && c.includes("status");
+    },
+    description: "status IN ('active', 'revoked')",
+  },
+  {
+    table: "api_keys",
+    name: "api_keys_key_hash_format",
+    validate: (c) => c.includes("^[0-9a-f]{64}$"),
+    description: "key_hash ~ '^[0-9a-f]{64}$'",
+  },
+  {
+    table: "api_keys",
+    name: "api_keys_key_prefix_format",
+    validate: (c) => c.includes("^img_live_[A-Za-z0-9_-]{8}$"),
+    description: "key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'",
+  },
+  {
+    table: "api_keys",
+    name: "api_keys_status_revoked_consistency",
+    validate: (c) =>
+      c.includes("status = 'active'") &&
+      c.includes("revoked_at IS NULL") &&
+      c.includes("status = 'revoked'") &&
+      c.includes("revoked_at IS NOT NULL"),
+    description: "(status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)",
+  },
+  {
+    table: "api_keys",
+    name: "api_keys_scopes_check",
+    validate: (c) => c.includes("image:transform"),
+    description: "scopes = 'image:transform'",
+  },
+  {
+    table: "api_keys",
+    name: "api_keys_expires_at_check",
+    validate: (c) =>
+      c.includes("expires_at IS NULL") &&
+      c.includes("expires_at > created_at"),
+    description: "expires_at IS NULL OR expires_at > created_at (both invariants required)",
+  },
+];
+
+export function assertCheckConstraints(
+  rules: CheckConstraintRule[],
+  actualRows: { table_name: string; constraint_name: string; check_clause: string }[]
+) {
+  for (const check of rules) {
+    const match = actualRows.find(
+      (r) => r.table_name === check.table && r.constraint_name === check.name
+    );
+    if (!match) {
+      throw new Error(
+        `Metadata Assertion Failed: Missing exact check constraint '${check.name}' on table '${check.table}'.`
+      );
+    }
+    const normalized = normalizeCheckClause(match.check_clause);
+    if (!check.validate(normalized)) {
+      throw new Error(
+        `Metadata Assertion Failed: Check constraint '${check.name}' failed semantic validation. Expected '${check.description}', got '${match.check_clause}'`
+      );
+    }
+  }
+}
+
 const EXPECTED_TABLES = [
   "account",
   "api_key_audit_events",
@@ -17,15 +136,7 @@ const EXPECTED_TABLES = [
   "verification",
 ];
 
-interface ExpectedFk {
-  table: string;
-  column: string;
-  foreignTable: string;
-  foreignColumn: string;
-  deleteRule: string;
-}
-
-const EXPECTED_FKS: ExpectedFk[] = [
+const EXPECTED_FOREIGN_KEYS = [
   { table: "account", column: "user_id", foreignTable: "user", foreignColumn: "id", deleteRule: "CASCADE" },
   { table: "session", column: "user_id", foreignTable: "user", foreignColumn: "id", deleteRule: "CASCADE" },
   { table: "organization_members", column: "organization_id", foreignTable: "organizations", foreignColumn: "id", deleteRule: "CASCADE" },
@@ -40,11 +151,11 @@ const EXPECTED_FKS: ExpectedFk[] = [
   { table: "api_key_audit_events", column: "actor_user_id", foreignTable: "user", foreignColumn: "id", deleteRule: "SET NULL" },
 ];
 
-const EXPECTED_UNIQUE: { table: string; column: string }[] = [
-  { table: "api_keys", column: "key_hash" },
-  { table: "session", column: "token" },
-  { table: "usage_events", column: "request_id" },
-  { table: "user", column: "email" },
+const EXPECTED_UNIQUE = [
+  { table: "api_keys", column: "key_hash", name: "api_keys_key_hash_unique" },
+  { table: "session", column: "token", name: "session_token_unique" },
+  { table: "usage_events", column: "request_id", name: "usage_events_request_id_unique" },
+  { table: "user", column: "email", name: "user_email_unique" },
 ];
 
 const EXPECTED_INDEXES = [
@@ -62,24 +173,26 @@ const EXPECTED_INDEXES = [
   "usage_events_key_created_idx",
 ];
 
-async function verifyDbMetadata() {
+export async function verifyDbMetadata() {
   assertDevelopmentDatabaseSafety();
 
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    console.error("❌ Metadata verification failed: DATABASE_URL is not set.");
-    process.exit(1);
+    throw new Error("DATABASE_URL is not defined in environment.");
   }
 
   const pool = new Pool({
     connectionString,
     max: 1,
+    connectionTimeoutMillis: 25000,
   });
+
+  let runError: Error | null = null;
 
   try {
     console.log("=== PostgreSQL Database Metadata Verification (Fail-Closed) ===");
 
-    // 1. Table assertions
+    // 1. Table existence
     const tablesRes = await pool.query<{ table_name: string }>(`
       SELECT table_name
       FROM information_schema.tables
@@ -95,10 +208,9 @@ async function verifyDbMetadata() {
     }
     console.log(`   ✅ All ${EXPECTED_TABLES.length} required application tables present.`);
 
-    // 2. Foreign Key Delete Rule assertions
+    // 2. Foreign Key Delete Rules
     const fksRes = await pool.query<{
       table_name: string;
-      constraint_name: string;
       column_name: string;
       foreign_table_name: string;
       foreign_column_name: string;
@@ -106,75 +218,77 @@ async function verifyDbMetadata() {
     }>(`
       SELECT
         tc.table_name,
-        tc.constraint_name,
         kcu.column_name,
         ccu.table_name AS foreign_table_name,
         ccu.column_name AS foreign_column_name,
         rc.delete_rule
       FROM information_schema.table_constraints AS tc
       JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-        AND tc.table_schema = kcu.table_schema
+        ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
       JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-        AND ccu.table_schema = tc.table_schema
+        ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
       JOIN information_schema.referential_constraints AS rc
-        ON rc.constraint_name = tc.constraint_name
+        ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema
       WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
-      ORDER BY tc.table_name, tc.constraint_name;
+      ORDER BY tc.table_name, kcu.column_name;
     `);
 
     console.log("\n2. Foreign Key Delete Rules:");
-    for (const expectedFk of EXPECTED_FKS) {
+    for (const expected of EXPECTED_FOREIGN_KEYS) {
       const match = fksRes.rows.find(
         (r) =>
-          r.table_name === expectedFk.table &&
-          r.column_name === expectedFk.column &&
-          r.foreign_table_name === expectedFk.foreignTable &&
-          r.foreign_column_name === expectedFk.foreignColumn
+          r.table_name === expected.table &&
+          r.column_name === expected.column &&
+          r.foreign_table_name === expected.foreignTable &&
+          r.foreign_column_name === expected.foreignColumn
       );
 
       if (!match) {
         throw new Error(
-          `Metadata Assertion Failed: Missing FK ${expectedFk.table}.${expectedFk.column} -> ${expectedFk.foreignTable}.${expectedFk.foreignColumn}`
+          `Metadata Assertion Failed: Missing FK from ${expected.table}.${expected.column} to ${expected.foreignTable}.${expected.foreignColumn}.`
         );
       }
 
-      if (match.delete_rule !== expectedFk.deleteRule) {
+      if (match.delete_rule !== expected.deleteRule) {
         throw new Error(
-          `Metadata Assertion Failed: FK ${expectedFk.table}.${expectedFk.column} has delete rule '${match.delete_rule}', expected '${expectedFk.deleteRule}'`
+          `Security Invariant Violation: FK from ${expected.table}.${expected.column} to ${expected.foreignTable}.${expected.foreignColumn} has delete rule '${match.delete_rule}', expected '${expected.deleteRule}'.`
         );
       }
-      console.log(`   - ${match.table_name}.${match.column_name} -> ${match.foreign_table_name}.${match.foreign_column_name} (ON DELETE ${match.delete_rule})`);
-    }
-    console.log(`   ✅ All ${EXPECTED_FKS.length} foreign key delete rules verified.`);
 
-    // 3. Unique Constraints
-    const uqRes = await pool.query<{
+      console.log(
+        `   - ${match.table_name}.${match.column_name} -> ${match.foreign_table_name}.${match.foreign_column_name} (ON DELETE ${match.delete_rule})`
+      );
+    }
+    console.log(`   ✅ All ${EXPECTED_FOREIGN_KEYS.length} foreign key delete rules verified.`);
+
+    // 3. Unique constraints
+    const uniqueRes = await pool.query<{
       table_name: string;
-      constraint_name: string;
       column_name: string;
+      constraint_name: string;
     }>(`
       SELECT
         tc.table_name,
-        tc.constraint_name,
-        kcu.column_name
+        kcu.column_name,
+        tc.constraint_name
       FROM information_schema.table_constraints AS tc
       JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-        AND tc.table_schema = kcu.table_schema
+        ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
       WHERE tc.constraint_type = 'UNIQUE' AND tc.table_schema = 'public'
       ORDER BY tc.table_name, kcu.column_name;
     `);
 
     console.log("\n3. Unique Constraints:");
-    for (const expectedUq of EXPECTED_UNIQUE) {
-      const match = uqRes.rows.find(
-        (r) => r.table_name === expectedUq.table && r.column_name === expectedUq.column
+    for (const expected of EXPECTED_UNIQUE) {
+      const match = uniqueRes.rows.find(
+        (r) =>
+          r.table_name === expected.table &&
+          r.column_name === expected.column &&
+          r.constraint_name === expected.name
       );
       if (!match) {
         throw new Error(
-          `Metadata Assertion Failed: Missing UNIQUE constraint on ${expectedUq.table}.${expectedUq.column}`
+          `Metadata Assertion Failed: Missing unique constraint '${expected.name}' on ${expected.table}.${expected.column}.`
         );
       }
       console.log(`   - ${match.table_name}.${match.column_name} (${match.constraint_name})`);
@@ -193,107 +307,19 @@ async function verifyDbMetadata() {
         cc.check_clause
       FROM information_schema.table_constraints AS tc
       JOIN information_schema.check_constraints AS cc
-        ON tc.constraint_name = cc.constraint_name
+        ON tc.constraint_name = cc.constraint_name AND tc.constraint_schema = cc.constraint_schema
       WHERE tc.table_schema = 'public' AND tc.constraint_type = 'CHECK'
         AND tc.constraint_name NOT LIKE '%_not_null'
       ORDER BY tc.table_name;
     `);
 
     console.log("\n4. Check Constraints:");
-    const requiredChecks: {
-      table: string;
-      name: string;
-      validate: (clause: string) => boolean;
-      description: string;
-    }[] = [
-      {
-        table: "usage_events",
-        name: "usage_events_units_equals_one",
-        validate: (c) => c.includes("units = 1"),
-        description: "units = 1",
-      },
-      {
-        table: "usage_events",
-        name: "usage_events_request_id_format",
-        validate: (c) => c.includes("^[0-9a-f]{64}$"),
-        description: "request_id ~ '^[0-9a-f]{64}$'",
-      },
-      {
-        table: "usage_events",
-        name: "usage_events_status_code_2xx",
-        validate: (c) =>
-          c.includes("status_code >= 200") &&
-          c.includes("status_code <= 299"),
-        description: "status_code >= 200 AND status_code <= 299",
-      },
-      {
-        table: "api_key_audit_events",
-        name: "api_key_audit_events_type_check",
-        validate: (c) =>
-          c.includes("created") &&
-          c.includes("revoked") &&
-          c.includes("rotation_created") &&
-          c.includes("expiration_scheduled"),
-        description: "event_type IN ('created', 'revoked', 'rotation_created', 'expiration_scheduled')",
-      },
-      {
-        table: "api_keys",
-        name: "api_keys_status_check",
-        validate: (c) => c.includes("active") && c.includes("revoked"),
-        description: "status IN ('active', 'revoked')",
-      },
-      {
-        table: "api_keys",
-        name: "api_keys_key_hash_format",
-        validate: (c) => c.includes("^[0-9a-f]{64}$"),
-        description: "key_hash ~ '^[0-9a-f]{64}$'",
-      },
-      {
-        table: "api_keys",
-        name: "api_keys_key_prefix_format",
-        validate: (c) => c.includes("^img_live_[A-Za-z0-9_-]{8}$"),
-        description: "key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'",
-      },
-      {
-        table: "api_keys",
-        name: "api_keys_status_revoked_consistency",
-        validate: (c) =>
-          c.includes("status = 'active'") &&
-          c.includes("revoked_at IS NULL") &&
-          c.includes("status = 'revoked'") &&
-          c.includes("revoked_at IS NOT NULL"),
-        description: "(status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)",
-      },
-      {
-        table: "api_keys",
-        name: "api_keys_scopes_check",
-        validate: (c) => c.includes("image:transform"),
-        description: "scopes = 'image:transform'",
-      },
-      {
-        table: "api_keys",
-        name: "api_keys_expires_at_check",
-        validate: (c) => c.includes("expires_at IS NULL") || c.includes("expires_at > created_at"),
-        description: "expires_at IS NULL OR expires_at > created_at",
-      },
-    ];
-
-    for (const check of requiredChecks) {
-      const match = checksRes.rows.find(
-        (r) => r.table_name === check.table && r.constraint_name === check.name
-      );
-      if (!match) {
-        throw new Error(
-          `Metadata Assertion Failed: Missing exact check constraint '${check.name}' on table '${check.table}'.`
-        );
+    assertCheckConstraints(REQUIRED_CHECK_CONSTRAINTS, checksRes.rows);
+    for (const check of REQUIRED_CHECK_CONSTRAINTS) {
+      const match = checksRes.rows.find((r) => r.table_name === check.table && r.constraint_name === check.name);
+      if (match) {
+        console.log(`   - ${match.table_name}: ${match.constraint_name} -> ${match.check_clause}`);
       }
-      const normalizedClause = match.check_clause.replace(/::text/g, "").replace(/\s+/g, " ");
-      if (!check.validate(normalizedClause)) {
-        throw new Error(
-          `Metadata Assertion Failed: Check constraint '${check.name}' failed semantic validation. Expected '${check.description}', got '${match.check_clause}'`
-        );
-      }
-      console.log(`   - ${match.table_name}: ${match.constraint_name} -> ${match.check_clause}`);
     }
     console.log("   ✅ All required check constraints verified.");
 
@@ -353,11 +379,18 @@ async function verifyDbMetadata() {
     console.log("🎉 ALL POSTGRESQL METADATA ASSERTIONS PASSED!");
     console.log("==================================================");
   } catch (err) {
+    runError = err as Error;
     console.error("❌ Metadata Verification Failed:", (err as Error).message || err);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     await pool.end();
   }
+
+  if (runError) {
+    throw runError;
+  }
 }
 
-verifyDbMetadata();
+if (process.argv[1]?.endsWith("verify-metadata.ts") || process.argv[1]?.endsWith("verify-metadata.js")) {
+  verifyDbMetadata();
+}
