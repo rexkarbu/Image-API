@@ -1,9 +1,18 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { resolveClientIp, normalizeIp } from "@/lib/security/client-ip";
 import { ApiError } from "@/lib/api/errors";
 
 describe("Trusted Client-IP Resolution & Normalization", () => {
   const correlationId = "test-req-correlation-id";
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
 
   describe("IPv4 & IPv6 Normalization (normalizeIp)", () => {
     it("canonicalizes equivalent IPv6 representations to identical RFC 5952 format", () => {
@@ -43,7 +52,103 @@ describe("Trusted Client-IP Resolution & Normalization", () => {
     });
   });
 
-  describe("Production on Vercel", () => {
+  describe("Real Environment Variable Trust Derivation (VERCEL === '1')", () => {
+    const setEnv = (nodeEnv?: string, vercelEnv?: string, vercel?: string) => {
+      const env = process.env as Record<string, string | undefined>;
+      if (nodeEnv !== undefined) env.NODE_ENV = nodeEnv;
+      else delete env.NODE_ENV;
+      if (vercelEnv !== undefined) env.VERCEL_ENV = vercelEnv;
+      else delete env.VERCEL_ENV;
+      if (vercel !== undefined) env.VERCEL = vercel;
+      else delete env.VERCEL;
+    };
+
+    it("permits trusted header when VERCEL='1' in production environment", () => {
+      setEnv("production", undefined, "1");
+
+      const request = new Request("http://localhost/v1/images/transform", {
+        headers: {
+          "x-vercel-forwarded-for": "203.0.113.195",
+        },
+      });
+
+      const ip = resolveClientIp(request, correlationId);
+      expect(ip).toBe("203.0.113.195");
+    });
+
+    it("permits trusted header when VERCEL_ENV='production' and VERCEL='1'", () => {
+      setEnv("development", "production", "1");
+
+      const request = new Request("http://localhost/v1/images/transform", {
+        headers: {
+          "x-vercel-forwarded-for": "198.51.100.42",
+        },
+      });
+
+      const ip = resolveClientIp(request, correlationId);
+      expect(ip).toBe("198.51.100.42");
+    });
+
+    it("fails closed with 503 when VERCEL_ENV='production' but VERCEL is absent (does not infer trust from VERCEL_ENV)", () => {
+      setEnv("development", "production", undefined);
+
+      const request = new Request("http://localhost/v1/images/transform", {
+        headers: {
+          "x-vercel-forwarded-for": "203.0.113.195",
+        },
+      });
+
+      expect(() => resolveClientIp(request, correlationId)).toThrow(ApiError);
+      try {
+        resolveClientIp(request, correlationId);
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).statusCode).toBe(503);
+        expect((err as ApiError).code).toBe("RATE_LIMIT_UNAVAILABLE");
+      }
+    });
+
+    it("fails closed with 503 when VERCEL_ENV='production' and VERCEL='0'", () => {
+      setEnv("development", "production", "0");
+
+      const request = new Request("http://localhost/v1/images/transform", {
+        headers: {
+          "x-vercel-forwarded-for": "203.0.113.195",
+        },
+      });
+
+      expect(() => resolveClientIp(request, correlationId)).toThrow(ApiError);
+    });
+
+    it("fails closed with 503 when NODE_ENV='production' and VERCEL is absent", () => {
+      setEnv("production", undefined, undefined);
+
+      const request = new Request("http://localhost/v1/images/transform", {
+        headers: {
+          "x-vercel-forwarded-for": "203.0.113.195",
+        },
+      });
+
+      expect(() => resolveClientIp(request, correlationId)).toThrow(ApiError);
+    });
+
+    it("never accepts spoofable fallback headers in production even if supplied", () => {
+      setEnv("production", undefined, "1");
+
+      const request = new Request("http://localhost/v1/images/transform", {
+        headers: {
+          "x-forwarded-for": "1.2.3.4",
+          "x-real-ip": "5.6.7.8",
+          "cf-connecting-ip": "9.10.11.12",
+        },
+      });
+
+      // x-vercel-forwarded-for is missing, so must fail closed
+      expect(() => resolveClientIp(request, correlationId)).toThrow(ApiError);
+    });
+  });
+
+  describe("Explicit Options Override", () => {
     it("resolves valid IPv4 from x-vercel-forwarded-for header in production on Vercel", () => {
       const request = new Request("http://localhost/v1/images/transform", {
         headers: {
@@ -77,27 +182,6 @@ describe("Trusted Client-IP Resolution & Normalization", () => {
       expect(ip).toBe("198.51.100.42");
     });
 
-    it("rejects caller-controlled x-forwarded-for when on Vercel in production", () => {
-      const request = new Request("http://localhost/v1/images/transform", {
-        headers: {
-          "x-forwarded-for": "1.2.3.4",
-        },
-      });
-
-      expect(() =>
-        resolveClientIp(request, correlationId, { isProduction: true, isVercel: true })
-      ).toThrow(ApiError);
-
-      try {
-        resolveClientIp(request, correlationId, { isProduction: true, isVercel: true });
-      } catch (err) {
-        expect(err).toBeInstanceOf(ApiError);
-        const apiErr = err as ApiError;
-        expect(apiErr.statusCode).toBe(503);
-        expect(apiErr.code).toBe("RATE_LIMIT_UNAVAILABLE");
-      }
-    });
-
     it("fails closed with 503 when trusted header is completely missing in production", () => {
       const request = new Request("http://localhost/v1/images/transform");
 
@@ -129,10 +213,8 @@ describe("Trusted Client-IP Resolution & Normalization", () => {
         resolveClientIp(request, correlationId, { isProduction: true, isVercel: true })
       ).toThrow(ApiError);
     });
-  });
 
-  describe("Production Outside Vercel (Fail-Closed Trust Boundary)", () => {
-    it("fails closed with 503 rather than trusting spoofed x-forwarded-for", () => {
+    it("fails closed with 503 outside Vercel in production", () => {
       const request = new Request("http://localhost/v1/images/transform", {
         headers: {
           "x-forwarded-for": "203.0.113.50",
@@ -140,23 +222,6 @@ describe("Trusted Client-IP Resolution & Normalization", () => {
           "cf-connecting-ip": "203.0.113.50",
         },
       });
-
-      expect(() =>
-        resolveClientIp(request, correlationId, { isProduction: true, isVercel: false })
-      ).toThrow(ApiError);
-
-      try {
-        resolveClientIp(request, correlationId, { isProduction: true, isVercel: false });
-      } catch (err) {
-        expect(err).toBeInstanceOf(ApiError);
-        const apiErr = err as ApiError;
-        expect(apiErr.statusCode).toBe(503);
-        expect(apiErr.code).toBe("RATE_LIMIT_UNAVAILABLE");
-      }
-    });
-
-    it("fails closed even if request has no headers in production outside Vercel", () => {
-      const request = new Request("http://localhost/v1/images/transform");
 
       expect(() =>
         resolveClientIp(request, correlationId, { isProduction: true, isVercel: false })

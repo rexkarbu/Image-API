@@ -20,7 +20,7 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
     } as unknown as Ratelimit);
 
   describe("Pure Validator (validateRateLimitResponse)", () => {
-    it("accepts valid Upstash response structure", () => {
+    it("accepts valid Upstash response structure with undefined reason", () => {
       const res = validateRateLimitResponse({
         success: true,
         limit: 120,
@@ -37,7 +37,7 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
       });
     });
 
-    it("accepts valid cacheBlock reason", () => {
+    it("accepts valid cacheBlock reason only when success is false", () => {
       const res = validateRateLimitResponse({
         success: false,
         limit: 20,
@@ -48,6 +48,18 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
 
       expect(res).not.toBeNull();
       expect(res?.success).toBe(false);
+    });
+
+    it("rejects cacheBlock reason when success is true", () => {
+      const res = validateRateLimitResponse({
+        success: true,
+        limit: 20,
+        remaining: 10,
+        reset: now + 10000,
+        reason: "cacheBlock",
+      }, now);
+
+      expect(res).toBeNull();
     });
 
     it("rejects timeout reason", () => {
@@ -62,7 +74,55 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
       expect(res).toBeNull();
     });
 
-    it("rejects unexpected unknown reason", () => {
+    it("rejects reason: 'cache'", () => {
+      expect(
+        validateRateLimitResponse({
+          success: true,
+          limit: 120,
+          remaining: 100,
+          reset: now + 10000,
+          reason: "cache",
+        }, now)
+      ).toBeNull();
+    });
+
+    it("rejects reason: null", () => {
+      expect(
+        validateRateLimitResponse({
+          success: true,
+          limit: 120,
+          remaining: 100,
+          reset: now + 10000,
+          reason: null,
+        }, now)
+      ).toBeNull();
+    });
+
+    it("rejects reason: empty string ''", () => {
+      expect(
+        validateRateLimitResponse({
+          success: true,
+          limit: 120,
+          remaining: 100,
+          reset: now + 10000,
+          reason: "",
+        }, now)
+      ).toBeNull();
+    });
+
+    it("rejects reason: 'denyList'", () => {
+      expect(
+        validateRateLimitResponse({
+          success: false,
+          limit: 120,
+          remaining: 0,
+          reset: now + 10000,
+          reason: "denyList",
+        }, now)
+      ).toBeNull();
+    });
+
+    it("rejects arbitrary unknown reason strings", () => {
       const res = validateRateLimitResponse({
         success: false,
         limit: 120,
@@ -79,7 +139,7 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
       expect(validateRateLimitResponse({ success: 1, limit: 10, remaining: 5, reset: now + 1000 }, now)).toBeNull();
     });
 
-    it("rejects invalid limit (NaN, Infinity, <=0, non-integer)", () => {
+    it("rejects invalid limit (NaN, Infinity, <=0, non-integer, fractional)", () => {
       expect(validateRateLimitResponse({ success: true, limit: NaN, remaining: 0, reset: now + 1000 }, now)).toBeNull();
       expect(validateRateLimitResponse({ success: true, limit: Infinity, remaining: 0, reset: now + 1000 }, now)).toBeNull();
       expect(validateRateLimitResponse({ success: true, limit: 0, remaining: 0, reset: now + 1000 }, now)).toBeNull();
@@ -87,7 +147,7 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
       expect(validateRateLimitResponse({ success: true, limit: 10.5, remaining: 5, reset: now + 1000 }, now)).toBeNull();
     });
 
-    it("rejects invalid remaining (negative, greater than limit, non-integer, NaN, Infinity)", () => {
+    it("rejects invalid remaining (negative, greater than limit, non-integer, NaN, Infinity, fractional)", () => {
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: -1, reset: now + 1000 }, now)).toBeNull();
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 15, reset: now + 1000 }, now)).toBeNull();
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5.5, reset: now + 1000 }, now)).toBeNull();
@@ -95,11 +155,12 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: Infinity, reset: now + 1000 }, now)).toBeNull();
     });
 
-    it("rejects invalid reset timestamps (<=0, NaN, Infinity)", () => {
+    it("rejects invalid reset timestamps (<=0, NaN, Infinity, fractional)", () => {
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: 0 }, now)).toBeNull();
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: -1000 }, now)).toBeNull();
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: NaN }, now)).toBeNull();
       expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: Infinity }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: now + 1000.5 }, now)).toBeNull();
     });
   });
 

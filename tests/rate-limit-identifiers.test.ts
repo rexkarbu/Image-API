@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   deriveIpIdentifier,
   deriveApiKeyIdentifier,
@@ -7,11 +7,56 @@ import {
 
 describe("Privacy-Preserving Rate Limit Identifiers & Secret Contract", () => {
   const validSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; // exactly 64 lowercase hex chars
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
 
   describe("HMAC Secret Validation (validateRateLimitSecret)", () => {
     it("accepts valid 64 lowercase hexadecimal character secret", () => {
       const secret = validateRateLimitSecret(validSecret);
       expect(secret).toBe(validSecret);
+    });
+
+    it("rejects valid 64-character hex surrounded by leading/trailing whitespace without trimming", () => {
+      expect(() => validateRateLimitSecret(` ${validSecret}`)).toThrow(
+        /must be exactly 64 lowercase hexadecimal/
+      );
+      expect(() => validateRateLimitSecret(`${validSecret} `)).toThrow(
+        /must be exactly 64 lowercase hexadecimal/
+      );
+      expect(() => validateRateLimitSecret(`  ${validSecret}  `)).toThrow(
+        /must be exactly 64 lowercase hexadecimal/
+      );
+    });
+
+    it("rejects empty explicit secret even if environment contains a valid secret (no fallback on empty string)", () => {
+      process.env.RATE_LIMIT_IDENTIFIER_SECRET = validSecret;
+      expect(() => validateRateLimitSecret("")).toThrow(
+        /must be exactly 64 lowercase hexadecimal/
+      );
+    });
+
+    it("rejects when environment variable is missing and explicitSecret is undefined", () => {
+      delete process.env.RATE_LIMIT_IDENTIFIER_SECRET;
+      expect(() => validateRateLimitSecret(undefined)).toThrow(
+        /must be exactly 64 lowercase hexadecimal/
+      );
+    });
+
+    it("uses valid environment variable when explicitSecret is undefined", () => {
+      process.env.RATE_LIMIT_IDENTIFIER_SECRET = validSecret;
+      expect(validateRateLimitSecret(undefined)).toBe(validSecret);
+    });
+
+    it("rejects all-zero placeholder value", () => {
+      const allZeros = "0".repeat(64);
+      expect(() => validateRateLimitSecret(allZeros)).toThrow(/all-zero placeholder/);
     });
 
     it("rejects 32-character secrets", () => {
@@ -36,14 +81,19 @@ describe("Privacy-Preserving Rate Limit Identifiers & Secret Contract", () => {
       expect(() => validateRateLimitSecret(nonHex)).toThrow(/must be exactly 64 lowercase hexadecimal/);
     });
 
-    it("rejects whitespace and empty values", () => {
-      expect(() => validateRateLimitSecret("")).toThrow(/must be exactly 64 lowercase hexadecimal/);
-      expect(() => validateRateLimitSecret("   ")).toThrow(/must be exactly 64 lowercase hexadecimal/);
-    });
-
     it("rejects known placeholder strings", () => {
       const placeholder = "0000000000000000000000000000000000000000000000000000000000000000_replace_with_openssl_rand_hex_32";
       expect(() => validateRateLimitSecret(placeholder)).toThrow();
+    });
+
+    it("never prints the rejected secret in error messages", () => {
+      const secretCandidate = "SUPER_SECRET_VALUE_THAT_MUST_NEVER_BE_LOGGED_OR_PRINTED_12345678";
+      try {
+        validateRateLimitSecret(secretCandidate);
+        expect.unreachable("Should have thrown");
+      } catch (err) {
+        expect((err as Error).message).not.toContain(secretCandidate);
+      }
     });
   });
 

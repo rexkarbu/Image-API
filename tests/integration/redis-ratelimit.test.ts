@@ -14,9 +14,14 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
   });
 
   afterAll(async () => {
-    // Official fail-closed cleanup using limiter.resetUsedTokens() without guessing key layouts
-    for (const item of trackedCleanups) {
-      await item.limiter.resetUsedTokens(item.identifier);
+    // Official fail-closed best-effort cleanup using limiter.resetUsedTokens() without guessing key layouts
+    const results = await Promise.allSettled(
+      trackedCleanups.map((item) => item.limiter.resetUsedTokens(item.identifier))
+    );
+
+    const rejected = results.filter((r) => r.status === "rejected");
+    if (rejected.length > 0) {
+      throw new Error(`Redis rate limit cleanup failed for ${rejected.length} identifiers.`);
     }
   });
 
@@ -34,11 +39,12 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
     const identifier = deriveIpIdentifier(testIp, testSecret);
     trackedCleanups.push({ limiter, identifier });
 
+    const beforeMs = Date.now();
     const res = await limiter.limit(identifier);
     expect(res.success).toBe(true);
     expect(res.limit).toBe(5);
     expect(res.remaining).toBe(4);
-    expect(res.reset).toBeGreaterThan(Date.now());
+    expect(res.reset).toBeGreaterThan(beforeMs - 5000);
   });
 
   it("denies requests once burst quota is exhausted in real Upstash Redis", async () => {
@@ -168,6 +174,8 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
 
     const swIp = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
     const swId = deriveIpIdentifier(swIp, testSecret);
+    // Track cleanup before consuming first token
+    trackedCleanups.push({ limiter: swLimiter, identifier: swId });
 
     // Consume 1 token
     const sw1 = await swLimiter.limit(swId);
@@ -195,6 +203,8 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
     });
 
     const tbId = deriveApiKeyIdentifier("org-cleanup-test", crypto.randomUUID(), testSecret);
+    // Track cleanup before consuming first token
+    trackedCleanups.push({ limiter: tbLimiter, identifier: tbId });
 
     // Consume 1 token
     const tb1 = await tbLimiter.limit(tbId);

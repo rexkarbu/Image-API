@@ -3,7 +3,7 @@ import {
   extractUpstashEndpointId,
   validateDevelopmentRedisSafety,
   validateUpstashRestUrl,
-  RedisSafetyEnv,
+  type RedisSafetyEnv,
 } from "@/lib/ratelimit/redis-safety";
 
 describe("Redis Safety Guard & URL Validator (Pure Unit Tests)", () => {
@@ -125,6 +125,12 @@ describe("Redis Safety Guard & URL Validator (Pure Unit Tests)", () => {
       expect(() => validateDevelopmentRedisSafety(env)).toThrow(
         /does not match pinned DEVELOPMENT_REDIS_ENDPOINT_ID/
       );
+    });
+
+    it("rejects when DEVELOPMENT_REDIS_ENDPOINT_ID is missing", () => {
+      const env = createValidEnv();
+      delete env.DEVELOPMENT_REDIS_ENDPOINT_ID;
+      expect(() => validateDevelopmentRedisSafety(env)).toThrow(/DEVELOPMENT_REDIS_ENDPOINT_ID is missing/);
     });
 
     it("never includes token or sensitive credentials in error messages", () => {

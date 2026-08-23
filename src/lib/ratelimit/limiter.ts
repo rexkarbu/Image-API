@@ -2,6 +2,11 @@ import "server-only";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { getRedisClient } from "./redis-safety";
+import {
+  validateRateLimitResponse,
+  getValidatedTimeout,
+  type ValidatedRateLimitResult,
+} from "./redis-safety-core";
 import { deriveIpIdentifier, deriveApiKeyIdentifier } from "@/lib/security/rate-limit-identifiers";
 import { ApiError } from "@/lib/api/errors";
 
@@ -21,127 +26,11 @@ export interface RateLimitOptions {
   timeoutMs?: number;
 }
 
-export interface ValidatedRateLimitResult {
-  success: boolean;
-  limit: number;
-  remaining: number;
-  reset: number;
-  retryAfterSeconds: number;
-}
-
-const MIN_TIMEOUT_MS = 500;
-const MAX_TIMEOUT_MS = 5000;
-const DEFAULT_PROD_TIMEOUT_MS = 2500;
-
-/**
- * Validates and clamps rate limiter timeout within safe bounds [500ms, 5000ms].
- */
-export function getValidatedTimeout(
-  explicitTimeout?: number,
-  isTestEnv?: boolean
-): number {
-  if (explicitTimeout !== undefined) {
-    if (
-      typeof explicitTimeout === "number" &&
-      Number.isFinite(explicitTimeout) &&
-      Number.isInteger(explicitTimeout) &&
-      explicitTimeout >= MIN_TIMEOUT_MS &&
-      explicitTimeout <= MAX_TIMEOUT_MS
-    ) {
-      return explicitTimeout;
-    }
-  }
-
-  if (process.env.UPSTASH_REDIS_TIMEOUT_MS) {
-    const parsed = Number(process.env.UPSTASH_REDIS_TIMEOUT_MS);
-    if (
-      Number.isFinite(parsed) &&
-      Number.isInteger(parsed) &&
-      parsed >= MIN_TIMEOUT_MS &&
-      parsed <= MAX_TIMEOUT_MS
-    ) {
-      return parsed;
-    }
-  }
-
-  const inTest = isTestEnv !== undefined ? isTestEnv : (process.env.NODE_ENV === "test" || Boolean(process.env.VITEST));
-  return inTest ? 4000 : DEFAULT_PROD_TIMEOUT_MS;
-}
-
-/**
- * Pure validator that strictly verifies the result structure from Upstash ratelimit.
- * Returns a validated result or null if the response is malformed, timed out, or unparseable.
- */
-export function validateRateLimitResponse(
-  raw: unknown,
-  currentTimeMs: number = Date.now()
-): ValidatedRateLimitResult | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const res = raw as Record<string, unknown>;
-
-  // Upstash timeout reason fails closed
-  if (res.reason === "timeout") {
-    return null;
-  }
-
-  // Allowed SDK reasons: undefined, null, "", "cacheBlock", "cache"
-  if (
-    res.reason !== undefined &&
-    res.reason !== null &&
-    res.reason !== "" &&
-    res.reason !== "cacheBlock" &&
-    res.reason !== "cache"
-  ) {
-    return null;
-  }
-
-  if (typeof res.success !== "boolean") {
-    return null;
-  }
-
-  if (
-    typeof res.limit !== "number" ||
-    !Number.isFinite(res.limit) ||
-    !Number.isInteger(res.limit) ||
-    res.limit <= 0
-  ) {
-    return null;
-  }
-
-  if (
-    typeof res.remaining !== "number" ||
-    !Number.isFinite(res.remaining) ||
-    !Number.isInteger(res.remaining) ||
-    res.remaining < 0 ||
-    res.remaining > res.limit
-  ) {
-    return null;
-  }
-
-  if (
-    typeof res.reset !== "number" ||
-    !Number.isFinite(res.reset) ||
-    res.reset <= 0
-  ) {
-    return null;
-  }
-
-  const retryAfterSeconds = Math.max(1, Math.ceil((res.reset - currentTimeMs) / 1000));
-  if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds < 1) {
-    return null;
-  }
-
-  return {
-    success: res.success,
-    limit: res.limit,
-    remaining: res.remaining,
-    reset: res.reset,
-    retryAfterSeconds,
-  };
-}
+export {
+  validateRateLimitResponse,
+  getValidatedTimeout,
+  type ValidatedRateLimitResult,
+};
 
 // In-memory hot cache for blocked requests (non-authoritative)
 const ephemeralCache = new Map<string, number>();

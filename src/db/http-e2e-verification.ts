@@ -3,6 +3,12 @@ import * as dotenv from "dotenv";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import { assertDevelopmentDatabaseSafety } from "./development-safety";
+import { validateDevelopmentRedisSafety } from "../lib/ratelimit/redis-safety-core";
+import {
+  validateRateLimitSecret,
+  deriveIpIdentifier,
+  deriveApiKeyIdentifier,
+} from "../lib/security/rate-limit-core";
 import { deriveRequestId } from "../lib/api/idempotency";
 import { validatePostgresUrlSecurity } from "./ssl-validation";
 import { Ratelimit } from "@upstash/ratelimit";
@@ -51,14 +57,6 @@ function validateTargetOrigin(rawUrl: string): string {
   return parsed.origin;
 }
 
-function deriveHmacIpIdentifier(ip: string, secret: string): string {
-  return crypto.createHmac("sha256", secret).update(`ip\0${ip.trim().toLowerCase()}`).digest("hex");
-}
-
-function deriveHmacKeyIdentifier(orgId: string, keyId: string, secret: string): string {
-  return crypto.createHmac("sha256", secret).update(`key\0${orgId.trim()}\0${keyId.trim()}`).digest("hex");
-}
-
 async function generateTestPng(w = 120, h = 80): Promise<Buffer> {
   return await sharp({
     create: {
@@ -100,15 +98,25 @@ function buildMultipartBody(
   return Buffer.concat(chunks);
 }
 
-async function runHttpE2E() {
-  // Step 0: Enforce strict centralized development database safety guard
-  assertDevelopmentDatabaseSafety();
+export async function runHttpE2E(): Promise<void> {
+  const testId = crypto.randomUUID().slice(0, 8);
+
+  // Step 0: Pre-flight all security and environment safety guards BEFORE constructing clients or network calls
+  try {
+    assertDevelopmentDatabaseSafety();
+    validateDevelopmentRedisSafety();
+    validateRateLimitSecret();
+  } catch {
+    console.error(`❌ E2E Safety Check Failed: operation=runHttpE2E runId=${testId}`);
+    process.exitCode = 1;
+    throw new Error("Preflight safety checks failed.");
+  }
 
   const targetOrigin = validateTargetOrigin(
     process.env.HTTP_E2E_BASE_URL || "http://127.0.0.1:3000"
   );
 
-  const dbUrl = process.env.DATABASE_URL;
+  const dbUrl = process.env.DATABASE_URL!;
   validatePostgresUrlSecurity(dbUrl, "DATABASE_URL");
 
   const pool = new Pool({
@@ -117,13 +125,8 @@ async function runHttpE2E() {
     connectionTimeoutMillis: 25000,
   });
 
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-  const rateLimitSecret = process.env.RATE_LIMIT_IDENTIFIER_SECRET;
-
-  if (!redisUrl || !redisToken || !rateLimitSecret) {
-    throw new Error("Missing Redis configuration in environment.");
-  }
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL!;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN!;
 
   const redis = new Redis({ url: redisUrl, token: redisToken });
   const ipLimiter = new Ratelimit({
@@ -139,7 +142,6 @@ async function runHttpE2E() {
     analytics: false,
   });
 
-  const testId = crypto.randomUUID().slice(0, 8);
   const testUserId = `http-e2e-user-${testId}`;
   const testOrgId = `http-e2e-org-${testId}`;
 
@@ -164,9 +166,14 @@ async function runHttpE2E() {
 
   const trackedKeyIds = [testKeyId, revokedKeyId, expiredKeyId];
   const trackedRequestDigests: string[] = [];
-  const trackedCleanups: { limiter: Ratelimit; identifier: string }[] = [];
 
   const isolatedFloodIp = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
+
+  // Precompute and register Redis cleanup identifiers BEFORE any requests are sent
+  const trackedCleanups: { limiter: Ratelimit; identifier: string }[] = [
+    { limiter: keyLimiter, identifier: deriveApiKeyIdentifier(testOrgId, testKeyId) },
+    { limiter: ipLimiter, identifier: deriveIpIdentifier(isolatedFloodIp) },
+  ];
 
   console.log("==================================================");
   console.log("🚀 Starting Milestone 4 Real HTTP, Rate Limiting & Metering Verification");
@@ -290,10 +297,6 @@ async function runHttpE2E() {
     console.log(
       `✅ Step 2 OK: HTTP 200 binary response verified (Format: ${outputMeta.format}, Dimensions: ${outputMeta.width}x${outputMeta.height}, Units: 1, RateLimit: ${rateLimitRemaining}/${rateLimitLimit}).`
     );
-
-    // Track API key limiter for official reset
-    const keyHmacId = deriveHmacKeyIdentifier(testOrgId, testKeyId, rateLimitSecret);
-    trackedCleanups.push({ limiter: keyLimiter, identifier: keyHmacId });
 
     // 3. Verify Exact PostgreSQL Usage Event Recording
     console.log("\n[Step 3] Verifying exact usage_events row in PostgreSQL...");
@@ -509,8 +512,6 @@ async function runHttpE2E() {
 
     // 8. Real HTTP IP Rate-Limit Exhaustion Test (120 req / 60s sliding window)
     console.log("\n[Step 8] Testing real HTTP IP rate-limit exhaustion (429 RATE_LIMITED)...");
-    const floodHmacId = deriveHmacIpIdentifier(isolatedFloodIp, rateLimitSecret);
-    trackedCleanups.push({ limiter: ipLimiter, identifier: floodHmacId });
 
     // Send unauthenticated requests in sequential batches until quota (120 req / 60s) is exhausted
     let rateLimitedRes: Response | null = null;
@@ -605,6 +606,8 @@ async function runHttpE2E() {
     process.exitCode = 1;
   } finally {
     console.log("\n🧹 Cleaning up test fixtures and Redis rate limiter allowances...");
+    let cleanupFailed = false;
+
     try {
       // 1. Clean PostgreSQL fixtures
       if (trackedRequestDigests.length > 0) {
@@ -622,18 +625,33 @@ async function runHttpE2E() {
         await pool.query(`DELETE FROM organizations WHERE id = $1`, [testOrgId]);
       }
       await pool.query(`DELETE FROM "user" WHERE id = $1`, [testUserId]);
-
-      // 2. Reset Redis rate limiter tokens via official API without guessing key layouts
-      for (const item of trackedCleanups) {
-        await item.limiter.resetUsedTokens(item.identifier);
-      }
-
-      console.log("✅ Fixture and Redis cleanup complete.");
     } catch {
+      cleanupFailed = true;
+    }
+
+    try {
+      // 2. Best-effort reset of all registered Redis rate limiter tokens via official API
+      const redisResults = await Promise.allSettled(
+        trackedCleanups.map((item) => item.limiter.resetUsedTokens(item.identifier))
+      );
+      if (redisResults.some((r) => r.status === "rejected")) {
+        cleanupFailed = true;
+      }
+    } catch {
+      cleanupFailed = true;
+    }
+
+    try {
+      await pool.end();
+    } catch {
+      cleanupFailed = true;
+    }
+
+    if (cleanupFailed) {
       console.error(`⚠️ Cleanup failed for test run: operation=cleanupFixtures runId=${testId}`);
       process.exitCode = 1;
-    } finally {
-      await pool.end();
+    } else {
+      console.log("✅ Fixture and Redis cleanup complete.");
     }
   }
 
@@ -642,6 +660,9 @@ async function runHttpE2E() {
   }
 }
 
-runHttpE2E().catch(() => {
-  process.exitCode = 1;
-});
+// Direct execution entrypoint
+if (require.main === module || (typeof process.argv[1] === "string" && process.argv[1].endsWith("http-e2e-verification.ts"))) {
+  runHttpE2E().catch(() => {
+    process.exitCode = 1;
+  });
+}
