@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { db, pool } from "@/db";
-import { user, organizations, organizationMembers, apiKeys, apiKeyAuditEvents, usageEvents } from "@/db/schema";
+import { user, organizations, organizationMembers, apiKeys, apiKeyAuditEvents, usageEvents, billingCustomers } from "@/db/schema";
 import { createOrganizationWithMembership, getUserFirstOrganization } from "@/lib/tenant/organizations";
 import {
   createApiKey,
@@ -96,6 +96,7 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
         await db.delete(apiKeys).where(inArray(apiKeys.id, createdKeyIds));
       }
       if (createdOrgIds.length > 0) {
+        await db.delete(billingCustomers).where(inArray(billingCustomers.organizationId, createdOrgIds));
         await db.delete(organizationMembers).where(inArray(organizationMembers.organizationId, createdOrgIds));
         await db.delete(organizations).where(inArray(organizations.id, createdOrgIds));
       }

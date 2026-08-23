@@ -49,10 +49,14 @@
   - Zero `usage_events` recorded on rate-limited (429) or limiter unavailable (503) requests.
   - Guarded live Redis integration tests (`pnpm test:redis-integration`) and full real HTTP E2E verification (`pnpm verify:http`).
 
-- [ ] **Milestone 5: Stripe Metered Billing & Reconciliation**
-  - Stripe Customer and Subscription creation on organization onboarding.
-  - Background worker for usage aggregation and Stripe Usage Record reporting.
-  - Usage reconciliation, invoice generation, and billing portal.
+- [x] **Milestone 5: Stripe Metered Billing & Reconciliation**
+  - Modern Stripe Billing Meters integration (`stripe.billing.meterEvents.create` and `stripe.billing.meters.listEventSummaries`).
+  - Idempotent Stripe Customer provisioning on organization creation, deferred post-commit to prevent onboarding rollback.
+  - Owner-only hosted Stripe Checkout (mode: `subscription`) and Customer Portal sessions with fixed same-origin redirects.
+  - Durable webhook inbox (`POST /api/webhooks/stripe`) with raw body signature verification and strict event ordering protection.
+  - Background billing worker (`src/lib/services/billing-worker.ts`) with distributed database-backed worker leasing (`billing_worker_leases`), atomic closed-window usage claiming, and single-batch item mapping.
+  - Two-layer usage reconciliation (local database vs. provider Stripe Meter Event Summaries) with settlement lag handling.
+  - Accessible billing dashboard (`/dashboard/billing`) featuring test-mode indicator, period usage metrics, and invoice history.
 
 - [ ] **Milestone 6: Observability, Production Hardening, and Documentation Portal**
   - Structured request logging and OpenTelemetry tracing.

@@ -1,8 +1,15 @@
 import { eq } from "drizzle-orm";
 import { db, DbClient } from "@/db";
-import { organizations, organizationMembers, Organization, OrganizationMember } from "@/db/schema";
+import {
+  organizations,
+  organizationMembers,
+  billingCustomers,
+  Organization,
+  OrganizationMember,
+} from "@/db/schema";
 import { createOrganizationSchema } from "@/lib/validations/organization";
 import { assertOrganizationScope } from "./rules";
+import { provisionStripeCustomerSafe } from "../services/billing-customers";
 
 export interface UserOrganizationContext {
   organization: Organization;
@@ -40,9 +47,10 @@ export async function getUserFirstOrganization(
 }
 
 /**
- * Atomically creates a new organization and assigns the current user as the 'owner'.
+ * Atomically creates a new organization, assigns the current user as 'owner',
+ * and enqueues a pending billing_customers provisioning record in the same transaction.
  *
- * Executed within a single database transaction to guarantee consistency.
+ * Stripe network I/O is explicitly deferred until AFTER the transaction commits.
  */
 export async function createOrganizationWithMembership(
   userId: string,
@@ -55,7 +63,7 @@ export async function createOrganizationWithMembership(
 
   const { name } = createOrganizationSchema.parse({ name: rawName });
 
-  return await client.transaction(async (tx) => {
+  const context = await client.transaction(async (tx) => {
     const orgId = crypto.randomUUID();
     const now = new Date();
 
@@ -79,11 +87,26 @@ export async function createOrganizationWithMembership(
       })
       .returning();
 
+    await tx.insert(billingCustomers).values({
+      organizationId: orgId,
+      provisioningIdempotencyKey: crypto.randomUUID(),
+      provisioningStatus: "pending",
+      livemode: false,
+      attemptCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+
     return {
       organization: newOrg,
       membership: newMembership,
     };
   });
+
+  // Post-commit: Best-effort attempt to provision Stripe customer without rolling back the transaction
+  await provisionStripeCustomerSafe(context.organization.id, client);
+
+  return context;
 }
 
 /**

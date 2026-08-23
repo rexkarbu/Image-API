@@ -252,3 +252,29 @@ Before any production deployment:
 1. Verify the installed Next.js version against the latest security advisories.
 2. Run `pnpm audit --prod` to ensure zero unmitigated high/critical production vulnerabilities.
 3. Rerun the full test suite (`pnpm test`), live Redis suite (`pnpm test:redis-integration`), typecheck (`pnpm typecheck`), and build (`pnpm build`).
+
+---
+
+## 11. Stripe Metered Billing & Usage Reporting Architecture
+
+### Modern Stripe Billing Meters
+- Modern **Stripe Billing Meters** (`stripe.billing.meterEvents.create` and `stripe.billing.meters.listEventSummaries`) replace legacy Usage Records.
+- The image transformation endpoint (`POST /v1/images/transform`) never calls or waits for Stripe. `usage_events` remains the immutable local financial source of truth.
+
+### Background Batch Reporting & Worker Leasing
+- Background workers (`src/lib/services/billing-worker.ts`) acquire a database-backed distributed lease (`billing_worker_leases`) to prevent concurrent execution.
+- Eligible usage events are grouped into closed UTC windows (`billing_usage_batches`) and mapped in `billing_usage_batch_items`. A database unique constraint on `usage_event_id` ensures a single local transformation event cannot belong to multiple Stripe report batches.
+- Meter events are submitted with deterministic identifiers (`imgapi_<batchId>`) and timestamps matching the closed usage window.
+
+### Durable Webhook Ingestion
+- Webhooks (`POST /api/webhooks/stripe`) verify raw signatures against `STRIPE_WEBHOOK_SECRET` and insert minimal event metadata into `billing_webhook_events`.
+- Asynchronous worker processes the durable inbox with strict event ordering guards against out-of-order delivery.
+- Sensitive payment details, card data, and unrestricted raw Stripe JSON are never stored.
+
+### Two-Layer Usage Reconciliation
+- Local reconciliation verifies eligible `usage_events` against `billing_usage_batch_items` and batch unit sums.
+- Provider reconciliation queries Stripe Meter Event Summaries, computing the signed difference between local reported units and provider aggregates while accounting for asynchronous settlement delays.
+
+### Owner-Only Authorization & Customer Portal
+- Customer provisioning occurs safely without blocking organization creation.
+- Hosted Stripe Checkout (mode: `subscription`) and Customer Portal sessions are restricted to verified organization owners. All pricing and customer identifiers are derived strictly on the server.

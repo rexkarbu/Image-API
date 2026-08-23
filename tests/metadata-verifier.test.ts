@@ -60,6 +60,104 @@ describe("PostgreSQL Metadata Verifier & Complete Fail-Closed Check Constraint U
       constraint_name: "api_keys_expires_at_check",
       check_clause: "((expires_at IS NULL) OR (expires_at > created_at))",
     },
+    {
+      table_name: "billing_checkout_sessions",
+      constraint_name: "billing_checkout_sessions_status_check",
+      check_clause:
+        "(status = ANY (ARRAY['creating'::text, 'open'::text, 'completed'::text, 'expired'::text, 'failed'::text]))",
+    },
+    {
+      table_name: "billing_customers",
+      constraint_name: "billing_customers_status_check",
+      check_clause:
+        "(provisioning_status = ANY (ARRAY['pending'::text, 'ready'::text, 'failed'::text]))",
+    },
+    {
+      table_name: "billing_customers",
+      constraint_name: "billing_customers_attempt_count_check",
+      check_clause: "(attempt_count >= 0)",
+    },
+    {
+      table_name: "billing_invoices",
+      constraint_name: "billing_invoices_status_check",
+      check_clause:
+        "(status = ANY (ARRAY['draft'::text, 'open'::text, 'paid'::text, 'uncollectible'::text, 'void'::text]))",
+    },
+    {
+      table_name: "billing_invoices",
+      constraint_name: "billing_invoices_amount_due_check",
+      check_clause: "(amount_due >= 0)",
+    },
+    {
+      table_name: "billing_invoices",
+      constraint_name: "billing_invoices_amount_paid_check",
+      check_clause: "(amount_paid >= 0)",
+    },
+    {
+      table_name: "billing_invoices",
+      constraint_name: "billing_invoices_period_check",
+      check_clause: "(period_end >= period_start)",
+    },
+    {
+      table_name: "billing_reconciliation_runs",
+      constraint_name: "billing_reconciliation_runs_status_check",
+      check_clause:
+        "(status = ANY (ARRAY['pending_provider'::text, 'matched'::text, 'mismatch'::text, 'failed'::text]))",
+    },
+    {
+      table_name: "billing_reconciliation_runs",
+      constraint_name: "billing_reconciliation_runs_period_check",
+      check_clause: "(period_end > period_start)",
+    },
+    {
+      table_name: "billing_reconciliation_runs",
+      constraint_name: "billing_reconciliation_runs_counts_check",
+      check_clause:
+        "((local_eligible_units >= 0) AND (batched_units >= 0) AND (reported_units >= 0) AND (stripe_aggregated_units >= 0))",
+    },
+    {
+      table_name: "billing_subscriptions",
+      constraint_name: "billing_subscriptions_status_check",
+      check_clause:
+        "(status = ANY (ARRAY['trialing'::text, 'active'::text, 'past_due'::text, 'paused'::text, 'unpaid'::text, 'canceled'::text, 'incomplete'::text, 'incomplete_expired'::text]))",
+    },
+    {
+      table_name: "billing_subscriptions",
+      constraint_name: "billing_subscriptions_period_check",
+      check_clause: "(current_period_end > current_period_start)",
+    },
+    {
+      table_name: "billing_usage_batches",
+      constraint_name: "billing_usage_batches_status_check",
+      check_clause:
+        "(status = ANY (ARRAY['pending'::text, 'processing'::text, 'reported'::text, 'failed'::text, 'manual_review'::text]))",
+    },
+    {
+      table_name: "billing_usage_batches",
+      constraint_name: "billing_usage_batches_units_check",
+      check_clause: "(units > 0)",
+    },
+    {
+      table_name: "billing_usage_batches",
+      constraint_name: "billing_usage_batches_window_check",
+      check_clause: "(window_end > window_start)",
+    },
+    {
+      table_name: "billing_usage_batches",
+      constraint_name: "billing_usage_batches_attempt_count_check",
+      check_clause: "(attempt_count >= 0)",
+    },
+    {
+      table_name: "billing_webhook_events",
+      constraint_name: "billing_webhook_events_status_check",
+      check_clause:
+        "(status = ANY (ARRAY['pending'::text, 'processing'::text, 'processed'::text, 'failed'::text]))",
+    },
+    {
+      table_name: "billing_webhook_events",
+      constraint_name: "billing_webhook_events_attempt_count_check",
+      check_clause: "(attempt_count >= 0)",
+    },
   ];
 
   it("normalizes PostgreSQL check clause formatting, casts, and whitespace", () => {

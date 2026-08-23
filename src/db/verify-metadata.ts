@@ -31,92 +31,68 @@ function extractQuotedLiterals(clause: string): string[] {
   return Array.from(clause.matchAll(/'([^']+)'/g)).map((m) => m[1]);
 }
 
+function validateEnumCheck(clause: string, expectedEnums: string[]): boolean {
+  const m = clause.match(/^\s*[a-z0-9_]+\s*(?:=\s*ANY\s*ARRAY\s*\[\s*(.*?)\s*\]|IN\s*\[?\s*(.*?)\s*\]?)\s*$/i);
+  if (!m) return false;
+  const inner = m[1] || m[2] || "";
+  const nonLiteral = inner.replace(/'[^']*'/g, "").replace(/[\s,]/g, "");
+  if (nonLiteral.length > 0) return false;
+  const expected = [...expectedEnums].sort();
+  const actual = extractQuotedLiterals(inner).sort();
+  return expected.length === actual.length && expected.every((val, idx) => val === actual[idx]);
+}
+
 export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
   {
     table: "usage_events",
     name: "usage_events_units_equals_one",
-    validate: (c) => {
-      // Must match exact complete expression: units = 1
-      return /^\s*units\s*=\s*1\s*$/i.test(c);
-    },
+    validate: (c) => /^\s*units\s*=\s*1\s*$/i.test(c),
     description: "units = 1",
   },
   {
     table: "usage_events",
     name: "usage_events_request_id_format",
-    validate: (c) => {
-      // Must match exact complete expression: request_id ~ '^[0-9a-f]{64}$'
-      return /^\s*request_id\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c);
-    },
+    validate: (c) => /^\s*request_id\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c),
     description: "request_id ~ '^[0-9a-f]{64}$'",
   },
   {
     table: "usage_events",
     name: "usage_events_status_code_2xx",
-    validate: (c) => {
-      // Must match exact complete expression: status_code >= 200 AND status_code <= 299 (or reversed)
-      return /^\s*(?:status_code\s*>=\s*200\s+AND\s+status_code\s*<=\s*299|status_code\s*<=\s*299\s+AND\s+status_code\s*>=\s*200)\s*$/i.test(
+    validate: (c) =>
+      /^\s*(?:status_code\s*>=\s*200\s+AND\s+status_code\s*<=\s*299|status_code\s*<=\s*299\s+AND\s+status_code\s*>=\s*200)\s*$/i.test(
         c
-      );
-    },
+      ),
     description: "status_code >= 200 AND status_code <= 299",
   },
   {
     table: "api_key_audit_events",
     name: "api_key_audit_events_type_check",
-    validate: (c) => {
-      // Match exact complete expression for event_type enum check
-      const m = c.match(/^\s*event_type\s*(?:=\s*ANY\s*ARRAY\s*\[\s*(.*?)\s*\]|IN\s*\[?\s*(.*?)\s*\]?)\s*$/i);
-      if (!m) return false;
-      const inner = m[1] || m[2] || "";
-      // Ensure inner only contains quoted literals and commas
-      const nonLiteral = inner.replace(/'[^']*'/g, "").replace(/[\s,]/g, "");
-      if (nonLiteral.length > 0) return false;
-      const expected = ["created", "expiration_scheduled", "revoked", "rotation_created"].sort();
-      const actual = extractQuotedLiterals(inner).sort();
-      return expected.length === actual.length && expected.every((val, idx) => val === actual[idx]);
-    },
+    validate: (c) =>
+      validateEnumCheck(c, ["created", "expiration_scheduled", "revoked", "rotation_created"]),
     description: "event_type IN ('created', 'revoked', 'rotation_created', 'expiration_scheduled')",
   },
   {
     table: "api_keys",
     name: "api_keys_status_check",
-    validate: (c) => {
-      // Match exact complete expression for status enum check
-      const m = c.match(/^\s*status\s*(?:=\s*ANY\s*ARRAY\s*\[\s*(.*?)\s*\]|IN\s*\[?\s*(.*?)\s*\]?)\s*$/i);
-      if (!m) return false;
-      const inner = m[1] || m[2] || "";
-      const nonLiteral = inner.replace(/'[^']*'/g, "").replace(/[\s,]/g, "");
-      if (nonLiteral.length > 0) return false;
-      const expected = ["active", "revoked"].sort();
-      const actual = extractQuotedLiterals(inner).sort();
-      return expected.length === actual.length && expected.every((val, idx) => val === actual[idx]);
-    },
+    validate: (c) => validateEnumCheck(c, ["active", "revoked"]),
     description: "status IN ('active', 'revoked')",
   },
   {
     table: "api_keys",
     name: "api_keys_key_hash_format",
-    validate: (c) => {
-      // Must match exact complete expression: key_hash ~ '^[0-9a-f]{64}$'
-      return /^\s*key_hash\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c);
-    },
+    validate: (c) => /^\s*key_hash\s*~\s*'\^\[0-9a-f\]\{64\}\$'\s*$/i.test(c),
     description: "key_hash ~ '^[0-9a-f]{64}$'",
   },
   {
     table: "api_keys",
     name: "api_keys_key_prefix_format",
-    validate: (c) => {
-      // Must match exact complete expression: key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'
-      return /^\s*key_prefix\s*~\s*'\^img_live_\[A-Za-z0-9_-\]\{8\}\$'\s*$/i.test(c);
-    },
+    validate: (c) => /^\s*key_prefix\s*~\s*'\^img_live_\[A-Za-z0-9_-\]\{8\}\$'\s*$/i.test(c),
     description: "key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'",
   },
   {
     table: "api_keys",
     name: "api_keys_status_revoked_consistency",
     validate: (c) => {
-      // Must match exact complete expression with both active/null and revoked/not null branches
       const branchActive = `(?:status\\s*=\\s*'active'\\s+AND\\s+revoked_at\\s+IS\\s+NULL|revoked_at\\s+IS\\s+NULL\\s+AND\\s+status\\s*=\\s*'active')`;
       const branchRevoked = `(?:status\\s*=\\s*'revoked'\\s+AND\\s+revoked_at\\s+IS\\s+NOT\\s+NULL|revoked_at\\s+IS\\s+NOT\\s+NULL\\s+AND\\s+status\\s*=\\s*'revoked')`;
       const full = new RegExp(
@@ -130,22 +106,143 @@ export const REQUIRED_CHECK_CONSTRAINTS: CheckConstraintRule[] = [
   {
     table: "api_keys",
     name: "api_keys_scopes_check",
-    validate: (c) => {
-      // Must match exact complete expression: scopes = 'image:transform'
-      return /^\s*scopes\s*=\s*'image:transform'\s*$/i.test(c);
-    },
+    validate: (c) => /^\s*scopes\s*=\s*'image:transform'\s*$/i.test(c),
     description: "scopes = 'image:transform'",
   },
   {
     table: "api_keys",
     name: "api_keys_expires_at_check",
-    validate: (c) => {
-      // Must match exact complete expression: expires_at IS NULL OR expires_at > created_at (or reversed)
-      return /^\s*(?:expires_at\s+IS\s+NULL\s+OR\s+expires_at\s*>\s*created_at|expires_at\s*>\s*created_at\s+OR\s+expires_at\s+IS\s+NULL)\s*$/i.test(
+    validate: (c) =>
+      /^\s*(?:expires_at\s+IS\s+NULL\s+OR\s+expires_at\s*>\s*created_at|expires_at\s*>\s*created_at\s+OR\s+expires_at\s+IS\s+NULL)\s*$/i.test(
         c
-      );
-    },
+      ),
     description: "expires_at IS NULL OR expires_at > created_at",
+  },
+  // Billing tables check constraints
+  {
+    table: "billing_checkout_sessions",
+    name: "billing_checkout_sessions_status_check",
+    validate: (c) => validateEnumCheck(c, ["creating", "open", "completed", "expired", "failed"]),
+    description: "status IN ('creating', 'open', 'completed', 'expired', 'failed')",
+  },
+  {
+    table: "billing_customers",
+    name: "billing_customers_status_check",
+    validate: (c) => validateEnumCheck(c, ["pending", "ready", "failed"]),
+    description: "provisioning_status IN ('pending', 'ready', 'failed')",
+  },
+  {
+    table: "billing_customers",
+    name: "billing_customers_attempt_count_check",
+    validate: (c) => /^\s*attempt_count\s*>=\s*0\s*$/i.test(c),
+    description: "attempt_count >= 0",
+  },
+  {
+    table: "billing_invoices",
+    name: "billing_invoices_status_check",
+    validate: (c) => validateEnumCheck(c, ["draft", "open", "paid", "uncollectible", "void"]),
+    description: "status IN ('draft', 'open', 'paid', 'uncollectible', 'void')",
+  },
+  {
+    table: "billing_invoices",
+    name: "billing_invoices_amount_due_check",
+    validate: (c) => /^\s*amount_due\s*>=\s*0\s*$/i.test(c),
+    description: "amount_due >= 0",
+  },
+  {
+    table: "billing_invoices",
+    name: "billing_invoices_amount_paid_check",
+    validate: (c) => /^\s*amount_paid\s*>=\s*0\s*$/i.test(c),
+    description: "amount_paid >= 0",
+  },
+  {
+    table: "billing_invoices",
+    name: "billing_invoices_period_check",
+    validate: (c) => /^\s*period_end\s*>=\s*period_start\s*$/i.test(c),
+    description: "period_end >= period_start",
+  },
+  {
+    table: "billing_reconciliation_runs",
+    name: "billing_reconciliation_runs_status_check",
+    validate: (c) => validateEnumCheck(c, ["pending_provider", "matched", "mismatch", "failed"]),
+    description: "status IN ('pending_provider', 'matched', 'mismatch', 'failed')",
+  },
+  {
+    table: "billing_reconciliation_runs",
+    name: "billing_reconciliation_runs_period_check",
+    validate: (c) => /^\s*period_end\s*>\s*period_start\s*$/i.test(c),
+    description: "period_end > period_start",
+  },
+  {
+    table: "billing_reconciliation_runs",
+    name: "billing_reconciliation_runs_counts_check",
+    validate: (c) =>
+      /local_eligible_units\s*>=\s*0/i.test(c) &&
+      /batched_units\s*>=\s*0/i.test(c) &&
+      /reported_units\s*>=\s*0/i.test(c) &&
+      /stripe_aggregated_units\s*>=\s*0/i.test(c),
+    description:
+      "local_eligible_units >= 0 AND batched_units >= 0 AND reported_units >= 0 AND stripe_aggregated_units >= 0",
+  },
+  {
+    table: "billing_subscriptions",
+    name: "billing_subscriptions_status_check",
+    validate: (c) =>
+      validateEnumCheck(c, [
+        "trialing",
+        "active",
+        "past_due",
+        "paused",
+        "unpaid",
+        "canceled",
+        "incomplete",
+        "incomplete_expired",
+      ]),
+    description:
+      "status IN ('trialing', 'active', 'past_due', 'paused', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired')",
+  },
+  {
+    table: "billing_subscriptions",
+    name: "billing_subscriptions_period_check",
+    validate: (c) => /^\s*current_period_end\s*>\s*current_period_start\s*$/i.test(c),
+    description: "current_period_end > current_period_start",
+  },
+  {
+    table: "billing_usage_batches",
+    name: "billing_usage_batches_status_check",
+    validate: (c) =>
+      validateEnumCheck(c, ["pending", "processing", "reported", "failed", "manual_review"]),
+    description: "status IN ('pending', 'processing', 'reported', 'failed', 'manual_review')",
+  },
+  {
+    table: "billing_usage_batches",
+    name: "billing_usage_batches_units_check",
+    validate: (c) => /^\s*units\s*>\s*0\s*$/i.test(c),
+    description: "units > 0",
+  },
+  {
+    table: "billing_usage_batches",
+    name: "billing_usage_batches_window_check",
+    validate: (c) => /^\s*window_end\s*>\s*window_start\s*$/i.test(c),
+    description: "window_end > window_start",
+  },
+  {
+    table: "billing_usage_batches",
+    name: "billing_usage_batches_attempt_count_check",
+    validate: (c) => /^\s*attempt_count\s*>=\s*0\s*$/i.test(c),
+    description: "attempt_count >= 0",
+  },
+  {
+    table: "billing_webhook_events",
+    name: "billing_webhook_events_status_check",
+    validate: (c) => validateEnumCheck(c, ["pending", "processing", "processed", "failed"]),
+    description: "status IN ('pending', 'processing', 'processed', 'failed')",
+  },
+  {
+    table: "billing_webhook_events",
+    name: "billing_webhook_events_attempt_count_check",
+    validate: (c) => /^\s*attempt_count\s*>=\s*0\s*$/i.test(c),
+    description: "attempt_count >= 0",
   },
 ];
 
@@ -175,6 +272,15 @@ const EXPECTED_TABLES = [
   "account",
   "api_key_audit_events",
   "api_keys",
+  "billing_checkout_sessions",
+  "billing_customers",
+  "billing_invoices",
+  "billing_reconciliation_runs",
+  "billing_subscriptions",
+  "billing_usage_batch_items",
+  "billing_usage_batches",
+  "billing_webhook_events",
+  "billing_worker_leases",
   "organization_members",
   "organizations",
   "session",
@@ -196,6 +302,16 @@ const EXPECTED_FOREIGN_KEYS = [
   { table: "api_key_audit_events", column: "api_key_id", foreignTable: "api_keys", foreignColumn: "id", deleteRule: "RESTRICT" },
   { table: "api_key_audit_events", column: "related_api_key_id", foreignTable: "api_keys", foreignColumn: "id", deleteRule: "RESTRICT" },
   { table: "api_key_audit_events", column: "actor_user_id", foreignTable: "user", foreignColumn: "id", deleteRule: "SET NULL" },
+  // Billing foreign keys
+  { table: "billing_checkout_sessions", column: "organization_id", foreignTable: "organizations", foreignColumn: "id", deleteRule: "RESTRICT" },
+  { table: "billing_checkout_sessions", column: "actor_user_id", foreignTable: "user", foreignColumn: "id", deleteRule: "SET NULL" },
+  { table: "billing_customers", column: "organization_id", foreignTable: "organizations", foreignColumn: "id", deleteRule: "RESTRICT" },
+  { table: "billing_invoices", column: "organization_id", foreignTable: "organizations", foreignColumn: "id", deleteRule: "RESTRICT" },
+  { table: "billing_reconciliation_runs", column: "organization_id", foreignTable: "organizations", foreignColumn: "id", deleteRule: "RESTRICT" },
+  { table: "billing_subscriptions", column: "organization_id", foreignTable: "organizations", foreignColumn: "id", deleteRule: "RESTRICT" },
+  { table: "billing_usage_batch_items", column: "batch_id", foreignTable: "billing_usage_batches", foreignColumn: "id", deleteRule: "RESTRICT" },
+  { table: "billing_usage_batch_items", column: "usage_event_id", foreignTable: "usage_events", foreignColumn: "id", deleteRule: "RESTRICT" },
+  { table: "billing_usage_batches", column: "organization_id", foreignTable: "organizations", foreignColumn: "id", deleteRule: "RESTRICT" },
 ];
 
 const EXPECTED_UNIQUE = [
@@ -203,6 +319,16 @@ const EXPECTED_UNIQUE = [
   { table: "session", column: "token", name: "session_token_unique" },
   { table: "usage_events", column: "request_id", name: "usage_events_request_id_unique" },
   { table: "user", column: "email", name: "user_email_unique" },
+  // Billing unique constraints
+  { table: "billing_checkout_sessions", column: "stripe_checkout_session_id", name: "billing_checkout_sessions_stripe_checkout_session_id_unique" },
+  { table: "billing_checkout_sessions", column: "idempotency_key", name: "billing_checkout_sessions_idempotency_key_unique" },
+  { table: "billing_customers", column: "stripe_customer_id", name: "billing_customers_stripe_customer_id_unique" },
+  { table: "billing_customers", column: "provisioning_idempotency_key", name: "billing_customers_provisioning_idempotency_key_unique" },
+  { table: "billing_invoices", column: "stripe_invoice_id", name: "billing_invoices_stripe_invoice_id_unique" },
+  { table: "billing_subscriptions", column: "stripe_subscription_id", name: "billing_subscriptions_stripe_subscription_id_unique" },
+  { table: "billing_usage_batch_items", column: "usage_event_id", name: "billing_usage_batch_items_usage_event_id_unique" },
+  { table: "billing_usage_batches", column: "meter_event_identifier", name: "billing_usage_batches_meter_event_identifier_unique" },
+  { table: "billing_worker_leases", column: "lease_token", name: "billing_worker_leases_lease_token_unique" },
 ];
 
 const EXPECTED_INDEXES = [
@@ -218,6 +344,23 @@ const EXPECTED_INDEXES = [
   "api_key_audit_events_related_rotation_idx",
   "usage_events_org_created_idx",
   "usage_events_key_created_idx",
+  // Billing indexes
+  "billing_checkout_sessions_active_org_idx",
+  "billing_checkout_sessions_org_idx",
+  "billing_customers_retry_idx",
+  "billing_customers_stripe_cust_idx",
+  "billing_invoices_org_created_idx",
+  "billing_invoices_stripe_inv_idx",
+  "billing_reconciliation_runs_org_idx",
+  "billing_subscriptions_org_active_idx",
+  "billing_subscriptions_org_idx",
+  "billing_subscriptions_stripe_sub_idx",
+  "billing_usage_batch_items_batch_idx",
+  "billing_usage_batch_items_org_idx",
+  "billing_usage_batches_org_window_idx",
+  "billing_usage_batches_status_retry_idx",
+  "billing_webhook_events_status_retry_idx",
+  "billing_webhook_events_created_idx",
 ];
 
 export async function verifyDbMetadata() {
@@ -368,7 +511,7 @@ export async function verifyDbMetadata() {
         console.log(`   - ${match.table_name}: ${match.constraint_name} -> ${match.check_clause}`);
       }
     }
-    console.log("   ✅ All required check constraints verified.");
+    console.log(`   ✅ All ${REQUIRED_CHECK_CONSTRAINTS.length} required check constraints verified.`);
 
     // 5. Plaintext API key check
     const columnsRes = await pool.query<{ table_name: string; column_name: string; data_type: string; is_nullable: string }>(`
@@ -419,6 +562,35 @@ export async function verifyDbMetadata() {
       throw new Error("Metadata Assertion Failed: 'api_key_audit_events_related_rotation_idx' is missing required partial WHERE predicate.");
     }
     console.log(`   - ${rotationIdx.indexname} -> ${rotationIdx.indexdef}`);
+
+    const subActiveIdx = indexesRes.rows.find((r) => r.indexname === "billing_subscriptions_org_active_idx");
+    if (
+      !subActiveIdx ||
+      (!subActiveIdx.indexdef.includes("NOT IN ('canceled'::text, 'incomplete_expired'::text)") &&
+        !subActiveIdx.indexdef.includes("status <> ALL (ARRAY['canceled'::text, 'incomplete_expired'::text])") &&
+        !subActiveIdx.indexdef.includes("status <> 'canceled'::text") &&
+        !subActiveIdx.indexdef.includes("status <> ALL (ARRAY['canceled'"))
+    ) {
+      throw new Error(
+        `Metadata Assertion Failed: 'billing_subscriptions_org_active_idx' is missing required partial WHERE predicate. Actual: ${subActiveIdx?.indexdef}`
+      );
+    }
+    console.log(`   - ${subActiveIdx.indexname} -> ${subActiveIdx.indexdef}`);
+
+    const checkoutActiveIdx = indexesRes.rows.find(
+      (r) => r.indexname === "billing_checkout_sessions_active_org_idx"
+    );
+    if (
+      !checkoutActiveIdx ||
+      (!checkoutActiveIdx.indexdef.includes("status = ANY (ARRAY['creating'::text, 'open'::text])") &&
+        !checkoutActiveIdx.indexdef.includes("status = ANY (ARRAY['creating'") &&
+        !checkoutActiveIdx.indexdef.includes("IN ('creating'::text, 'open'::text)"))
+    ) {
+      throw new Error(
+        `Metadata Assertion Failed: 'billing_checkout_sessions_active_org_idx' is missing required partial WHERE predicate. Actual: ${checkoutActiveIdx?.indexdef}`
+      );
+    }
+    console.log(`   - ${checkoutActiveIdx.indexname} -> ${checkoutActiveIdx.indexdef}`);
 
     console.log(`   ✅ All ${EXPECTED_INDEXES.length} expected query and partial unique indexes verified.`);
 

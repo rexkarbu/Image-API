@@ -619,9 +619,9 @@ export async function runHttpE2E(): Promise<void> {
     console.log("\n==================================================");
     console.log("🎉 ALL REAL HTTP TRANSFORMATION, RATE LIMITING & METERING CHECKS PASSED!");
     console.log("==================================================");
-  } catch {
-    runError = new Error("HTTP E2E Verification failed during test execution.");
-    console.error(`❌ HTTP E2E Verification Failed: operation=runHttpE2E runId=${testId}`);
+  } catch (err) {
+    runError = err instanceof Error ? err : new Error(String(err));
+    console.error(`❌ HTTP E2E Verification Failed: ${(err as Error).message} (operation=runHttpE2E runId=${testId})`);
     process.exitCode = 1;
   } finally {
     console.log("\n🧹 Cleaning up test fixtures and Redis rate limiter allowances...");
@@ -640,11 +640,13 @@ export async function runHttpE2E(): Promise<void> {
         await pool.query(`DELETE FROM api_keys WHERE id = ANY($1::text[])`, [trackedKeyIds]);
       }
       if (testOrgId) {
+        await pool.query(`DELETE FROM billing_customers WHERE organization_id = $1`, [testOrgId]);
         await pool.query(`DELETE FROM organization_members WHERE organization_id = $1`, [testOrgId]);
         await pool.query(`DELETE FROM organizations WHERE id = $1`, [testOrgId]);
       }
       await pool.query(`DELETE FROM "user" WHERE id = $1`, [testUserId]);
-    } catch {
+    } catch (cleanErr) {
+      console.error("Cleanup error:", (cleanErr as Error).message);
       cleanupFailed = true;
     }
 

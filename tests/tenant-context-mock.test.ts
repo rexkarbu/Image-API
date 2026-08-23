@@ -101,6 +101,13 @@ describe("Tenant Data-Access Helpers with Mocked DB", () => {
       transaction: vi.fn().mockImplementation(async (callback) => {
         return await callback(mockTx);
       }),
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue([]),
+          }),
+        }),
+      }),
     } as unknown as DbClient;
 
     const result = await createOrganizationWithMembership(

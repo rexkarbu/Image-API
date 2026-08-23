@@ -14,6 +14,7 @@ const navItems: NavItem[] = [
   { name: "Overview", href: "/dashboard", exact: true },
   { name: "Usage", href: "/dashboard/usage" },
   { name: "API Keys", href: "/dashboard/api-keys" },
+  { name: "Billing", href: "/dashboard/billing" },
 ];
 
 export function DashboardNav() {

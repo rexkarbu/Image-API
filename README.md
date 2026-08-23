@@ -45,7 +45,16 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 - **Zero-Billing Guarantee**: Zero `usage_events` rows are recorded for rate-limited (429) or unavailable (503) attempts.
 - **Live Redis Integration & HTTP E2E Suites**: Dedicated guarded runner (`pnpm test:redis-integration`) and full loopback verification (`pnpm verify:http`).
 
-*Milestone 5 (Stripe Metered Billing & Reconciliation) is scheduled next.*
+**Milestone 5 — Stripe Metered Billing & Reconciliation** (Completed)
+- Modern **Stripe Billing Meters** architecture (`stripe.billing.meterEvents.create` and `stripe.billing.meters.listEventSummaries`).
+- Idempotent Stripe Customer provisioning on organization creation, deferred post-commit to prevent onboarding rollback.
+- Owner-only hosted Stripe Checkout (mode: `subscription`) and Customer Portal sessions with fixed same-origin redirects.
+- Durable webhook inbox (`POST /api/webhooks/stripe`) with raw body signature verification and strict event ordering protection.
+- Background billing worker (`src/lib/services/billing-worker.ts`) with distributed database-backed worker leasing (`billing_worker_leases`), atomic closed-window usage claiming, and single-batch item mapping.
+- Two-layer usage reconciliation (local database vs. provider Stripe Meter Event Summaries) with settlement lag handling.
+- Accessible billing dashboard (`/dashboard/billing`) featuring test-mode indicator, period usage metrics, and invoice history.
+
+*Milestone 6 (Observability, Production Hardening, and Documentation Portal) is scheduled next.*
 
 ---
 
@@ -55,6 +64,7 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 - **Package Manager**: `pnpm` (`>=9.0.0`)
 - **Database**: PostgreSQL (`v15+`, developed against Neon Serverless PostgreSQL)
 - **Distributed Cache / Rate Limiter**: Upstash Redis (REST-based)
+- **Billing & Metering**: Stripe (Test Mode Sandbox)
 
 ---
 
@@ -143,14 +153,19 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (240 tests).
-- `pnpm test:redis-integration`: Runs live Upstash Redis rate limiting integration tests (5 tests).
-- `pnpm test:integration`: Runs full live PostgreSQL and Redis integration test suite (28 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite.
+- `pnpm test:redis-integration`: Runs live Upstash Redis rate limiting integration tests.
+- `pnpm test:integration`: Runs full live PostgreSQL and Redis integration test suite.
+- `pnpm test:stripe-integration`: Runs live Stripe test-mode sandbox integration tests.
+- `pnpm test:webhook-e2e`: Runs signed Stripe webhook verification integration tests.
 - `pnpm verify:http`: Runs real HTTP E2E verification of `POST /v1/images/transform` against running server.
+- `pnpm stripe:verify-config`: Validates configured Stripe Price and Meter in test mode.
+- `pnpm billing:worker`: Runs background billing worker CLI for customer provisioning, usage batching, and meter reporting.
+- `pnpm billing:reconcile`: Runs usage reconciliation CLI across active subscriptions.
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.
 - `pnpm db:check`: Checks Drizzle schema snapshot consistency.
 - `pnpm db:migrate`: Executes pending SQL migrations over direct connection.
-- `pnpm db:smoke`: Validates live PostgreSQL connection and verifies all 9 tables.
+- `pnpm db:smoke`: Validates live PostgreSQL connection and verifies all 18 tables.
 - `pnpm db:verify`: Executes assertion-based metadata verification against live schema.
 - `pnpm db:studio`: Opens Drizzle Studio for visual database inspection.
 
