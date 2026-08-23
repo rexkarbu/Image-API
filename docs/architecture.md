@@ -29,7 +29,7 @@
 |  - user / session / account                                                       |
 |  - organizations / organization_members                                           |
 |  - api_keys (hashed SHA-256)                                                      |
-|  - usage_events (append-only immutable stream)                                    |
+|  - usage_events (append-only immutable stream, SHA-256 request_id)                |
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -66,6 +66,8 @@
 | **Rotate Secret Key** | Allowed | Allowed | Denied (`403 Forbidden`) |
 | **Revoke Secret Key** | Allowed | Allowed | Denied (`403 Forbidden`) |
 
+---
+
 ## 3. Multi-Tenancy & Security Invariants
 
 ### Hard Tenant Security Invariant
@@ -82,34 +84,64 @@
 
 ---
 
-## 4. Usage Events & Billing Architecture
+## 4. Image Processing & Usage Metering Pipeline (Milestone 2)
+
+### Endpoint Contract (`POST /v1/images/transform`)
+- **Runtime**: Explicitly declared as `runtime = "nodejs"`, `dynamic = "force-dynamic"`, `maxDuration = 30`.
+- **Authentication**: Server-only helper `authenticateApiRequest` verifies the Bearer API key against the database, returning indistinguishable 401 UNAUTHORIZED responses on any invalid, expired, or revoked key.
+- **Idempotency & Request Isolation**:
+  - `Idempotency-Key` header is required (16-128 printable ASCII characters without control characters or whitespace).
+  - A tenant-namespaced 64-character SHA-256 digest is derived: `SHA-256(organizationId + "\0" + rawIdempotencyKey)`.
+  - The raw user idempotency key is never persisted or logged.
+- **Streaming Multipart Parser**:
+  - Uses `busboy` on incoming request streams without writing temporary files to disk.
+  - Limits: max file size `10 MiB`, max fields `6`, max parts `10`, max field size `1024` bytes.
+  - Validates options and rejects unknown/duplicate fields.
+  - Rejects explicit `quality` parameter when `format = "png"` (PNG uses lossless compression).
+- **Sharp Processing Sandboxing**:
+  - Configured with `failOn: "warning"`, `limitInputPixels: 40_000_000`, `unlimited: false`, `pages: 1`, `animated: false`.
+  - Allowed input formats: `jpeg`, `png`, `webp` (rejects SVG, GIF, TIFF, PDF, animated WebP).
+  - Automatically strips all EXIF, GPS, XMP, and IPTC metadata.
+  - Auto-orients based on EXIF (`.rotate()`) prior to resizing.
+  - Flattens transparent alpha channels over solid white when converting to JPEG.
+  - Output formats supported: JPEG (mozjpeg), PNG (lossless), WebP, AVIF.
+  - Output bounds: max dimensions `4096x4096`, max output buffer `20 MiB`.
+- **Atomic Usage Metering**:
+  - Usage recording occurs strictly **after** successful image processing and verification that client is still connected (`!request.signal.aborted`).
+  - Writes to `usage_events` with `units = 1`, `status_code = 200`, `endpoint = "/v1/images/transform"`.
+  - Uses PostgreSQL `ON CONFLICT (request_id) DO NOTHING` to serialize concurrent requests: losing requests receive `409 DUPLICATE_REQUEST` without recording additional usage units.
+  - All failure paths (400, 401, 413, 415, 422, 500, 503) create **zero** usage event rows.
+
+---
+
+## 5. Usage Events & Billing Architecture
 
 ### Immutable Audit Log (`usage_events`)
 - The `usage_events` table serves as the primary system of record for all metered activity.
 - Every successful transformation creates an immutable event record containing:
-  - `request_id` (Unique idempotency key)
-  - `organization_id`
-  - `api_key_id`
-  - `endpoint`
-  - `units` (strictly > 0)
-  - `status_code`
+  - `id` (UUID primary key)
+  - `request_id` (64-character lowercase SHA-256 hex digest, unique)
+  - `organization_id` (Tenant FK, ON DELETE RESTRICT)
+  - `api_key_id` (API Key FK, ON DELETE RESTRICT)
+  - `endpoint` (e.g. `/v1/images/transform`)
+  - `units` (Check constraint: `units = 1`)
+  - `status_code` (Check constraint: `200-299`)
   - `created_at` (Timestamp with timezone)
 
 ### Decoupled Metering & Async Billing
-- **Request Path**: Synchronously records the event in PostgreSQL or fast buffer.
+- **Request Path**: Synchronously records the event in PostgreSQL.
 - **Billing Path**: Asynchronous batch aggregation for Stripe metered billing reconciliation in future milestones.
-- Failed processing or validation errors do not generate billable usage units.
 
 ---
 
-## 5. Runtime & Infrastructure Requirements
+## 6. Runtime & Infrastructure Requirements
 
-- **Node.js Runtime**: Authentication routes, database connection pool, and upcoming image transformation routes explicitly declare `runtime = "nodejs"` to leverage native Node.js buffer and cryptographic primitives.
+- **Node.js Runtime**: Authentication routes, database connection pool, and image transformation routes explicitly declare `runtime = "nodejs"` to leverage native Node.js buffer, cryptographic primitives, and Sharp native binaries.
 - **Database Pooling**: Standard `pg.Pool` connection pooling compatible with any standard PostgreSQL instance or pooled cloud proxy.
 
 ---
 
-## 6. Data Retention & Foreign-Key Delete Semantics
+## 7. Data Retention & Foreign-Key Delete Semantics
 
 To prevent accidental data loss and maintain an untampered audit history:
 - **Better Auth Tables (`session`, `account`)**: `ON DELETE CASCADE` when the parent `user` is deleted.
@@ -120,14 +152,13 @@ To prevent accidental data loss and maintain an untampered audit history:
 - **`usage_events`**:
   - `organization_id`: `ON DELETE RESTRICT`.
   - `api_key_id`: `ON DELETE RESTRICT`.
-  - Usage events represent an immutable audit stream and must never be deleted.
+  - Usage events represent an immutable financial audit stream and must never be erased.
 
 ---
 
-## 7. Release-Safety & Deployment Check
+## 8. Release-Safety & Deployment Check
 
 Before any production deployment:
 1. Verify the installed Next.js version against the latest security advisories.
 2. Run `pnpm audit --prod` to ensure zero unmitigated high/critical production vulnerabilities.
 3. Rerun the full test suite (`pnpm test`), typecheck (`pnpm typecheck`), and build (`pnpm build`).
-

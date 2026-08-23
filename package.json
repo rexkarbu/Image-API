@@ -16,7 +16,8 @@
     "db:check": "dotenv -e .env.local -e .env -- drizzle-kit check",
     "db:smoke": "dotenv -e .env.local -e .env -- tsx src/db/smoke.ts",
     "db:verify": "dotenv -e .env.local -e .env -- tsx src/db/verify-metadata.ts",
-    "db:studio": "dotenv -e .env.local -e .env -- drizzle-kit studio"
+    "db:studio": "dotenv -e .env.local -e .env -- drizzle-kit studio",
+    "verify:http": "dotenv -e .env.local -e .env -- tsx src/db/http-e2e-verification.ts"
   },
   "engines": {
     "node": ">=20.9.0",
@@ -24,6 +25,7 @@
   },
   "dependencies": {
     "better-auth": "^1.1.21",
+    "busboy": "1.6.0",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
     "lucide-react": "^0.475.0",
@@ -32,11 +34,13 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "server-only": "^0.0.1",
+    "sharp": "0.35.3",
     "tailwind-merge": "^3.0.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
+    "@types/busboy": "1.5.4",
     "@types/node": "^22.13.4",
     "@types/pg": "^8.11.11",
     "@types/react": "^19.0.8",

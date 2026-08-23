@@ -17,7 +17,16 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 - Append-only `api_key_audit_events` tracking creation, rotation, and revocation.
 - Server-only API key verification foundation with throttled `last_used_at` writes.
 
-*Milestone 2 (Image Transformation Endpoint & Metering) is scheduled next.*
+**Milestone 2 — Image Transformation Endpoint & Accurate Usage Metering** (Completed)
+- Public API route handler `POST /v1/images/transform` running on Node.js runtime with `maxDuration = 30`.
+- Bearer API key authentication (`Authorization: Bearer img_live_...`) with indistinguishable 401 rejection.
+- Streaming multipart/form-data parsing with Busboy enforcing 10 MiB payload limits, strict field validation, and file chunk buffering.
+- Sharp sandboxed image processing: automatic EXIF stripping, auto-orientation (`.rotate()`), dimension limits (max 4096x4096), input format gating (JPEG, PNG, WebP), and output encoding (JPEG with mozjpeg & alpha flattening, PNG lossless, WebP, AVIF).
+- Explicit `Idempotency-Key` header enforcement (16-128 visible ASCII characters) converted to tenant-namespaced 64-character SHA-256 request IDs.
+- Atomic append-only `usage_events` metering with PostgreSQL `ON CONFLICT (request_id) DO NOTHING` serialization: exactly 1 billable unit recorded only after successful transformation, returning 409 `DUPLICATE_REQUEST` on key reuse.
+- Zero usage recorded on all failure paths (auth errors, invalid options, unsupported input, corrupt files).
+
+*Milestone 3 (Developer Dashboard for Keys and Usage) is scheduled next.*
 
 ---
 
@@ -56,6 +65,7 @@ cp .env.example .env.local
 | `BETTER_AUTH_URL` | Canonical Better Auth base URL | `http://localhost:3000` |
 | `NEXT_PUBLIC_APP_URL` | Application public URL | `http://localhost:3000` |
 | `DATABASE_ENV` | Environment marker (`development` \| `production`) | `development` |
+| `DEVELOPMENT_DATABASE_ENDPOINT_ID` | Pinned Neon endpoint identifier for fail-closed dev safety | `ep-example-development` |
 | `RUN_DB_INTEGRATION_TESTS` | Safety opt-in for live DB integration tests | `true` |
 
 ---
@@ -87,7 +97,12 @@ cp .env.example .env.local
    pnpm db:smoke
    ```
 
-6. **Start Development Server**:
+6. **Verify Database Schema & Constraints**:
+   ```bash
+   pnpm db:verify
+   ```
+
+7. **Start Development Server**:
    ```bash
    pnpm dev
    ```
@@ -101,8 +116,9 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (89 tests).
-- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (10 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite (129 tests).
+- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (21 tests).
+- `pnpm verify:http`: Runs real HTTP E2E verification of `POST /v1/images/transform` against running server.
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.
 - `pnpm db:check`: Checks Drizzle schema snapshot consistency.
 - `pnpm db:migrate`: Executes pending SQL migrations over direct connection.
@@ -112,13 +128,28 @@ cp .env.example .env.local
 
 ---
 
-## What Is Intentionally Deferred (Out of Scope for M1)
+## Image Transformation API (`POST /v1/images/transform`)
+
+### Request Headers
+- `Authorization`: `Bearer img_live_<secret>` (Required)
+- `Idempotency-Key`: `16-128 printable ASCII characters` (Required)
+- `Content-Type`: `multipart/form-data` (Required)
+
+### Multipart Form Fields
+- `file`: Image binary data (Required; JPEG, PNG, or WebP up to 10 MiB)
+- `width`: Integer `1-4096` (Optional)
+- `height`: Integer `1-4096` (Optional)
+- `format`: `jpeg` | `png` | `webp` | `avif` (Optional, default: `webp`)
+- `quality`: Integer `1-100` (Optional, default: `80` for JPEG/WebP/AVIF; rejected if `format=png`)
+- `fit`: `cover` | `contain` | `inside` | `fill` (Optional, default: `inside`)
+- `withoutEnlargement`: `true` | `false` (Optional, default: `true`)
+
+---
+
+## What Is Intentionally Deferred (Out of Scope for M2)
 
 The following features are intentionally not implemented yet and are scheduled for subsequent milestones:
 
-- Image processing endpoint (`POST /v1/images/transform`) and `sharp` (Milestone 2).
-- Multipart upload parsing and image transformations (Milestone 2).
-- Usage event recording and request metering (Milestone 2).
 - Real-time usage event stream visualization on dashboard (Milestone 3).
 - Rate limiting and Redis/Upstash integrations (Milestone 4).
 - Stripe customer synchronization and metered billing reporting (Milestone 5).

@@ -201,7 +201,9 @@ async function verifyDbMetadata() {
 
     console.log("\n4. Check Constraints:");
     const requiredChecks = [
-      { table: "usage_events", pattern: "units > 0", name: "usage_events_units_positive" },
+      { table: "usage_events", pattern: "units = 1", name: "usage_events_units_equals_one" },
+      { table: "usage_events", pattern: "[0-9a-f]{64}", name: "usage_events_request_id_format" },
+      { table: "usage_events", pattern: "status_code", name: "usage_events_status_code_2xx" },
       { table: "api_key_audit_events", pattern: "created", name: "api_key_audit_events_type_check" },
       { table: "api_keys", pattern: "active", name: "api_keys_status_check" },
       { table: "api_keys", pattern: "[0-9a-f]{64}", name: "api_keys_key_hash_format" },

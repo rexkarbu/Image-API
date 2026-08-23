@@ -13,13 +13,16 @@
   - Secret key masking, last-used tracking, and idempotent revocation.
   - Atomic key rotation with immediate revocation or 24-hour transition grace period.
   - Append-only `api_key_audit_events` stream tracking creation, rotation, and revocation.
-  - Server-only API key verification foundation (image endpoint and usage recording remain scheduled for Milestone 2).
+  - Server-only API key verification foundation.
 
-- [ ] **Milestone 2: Image Transformation Endpoint & Accurate Usage Recording**
-  - Binary image processing with `sharp` (resize, convert, compress).
-  - Multipart upload parsing on Node.js runtime.
-  - Authentication middleware validating hashed API key.
-  - Atomic, idempotent `usage_events` recording with unique `request_id`.
+- [x] **Milestone 2: Image Transformation Endpoint & Accurate Usage Recording**
+  - Public route handler `POST /v1/images/transform` with `runtime = "nodejs"`.
+  - Machine-to-machine authentication via Bearer API keys (`Authorization: Bearer img_live_...`).
+  - Streaming multipart/form-data parser using Busboy with strict size (10 MiB) and field limit gating.
+  - Sandboxed Sharp transformation pipeline: auto-orientation, EXIF/GPS stripping, resizing with aspect-ratio preserving fit modes, alpha channel flattening, and multi-format encoding (JPEG, PNG, WebP, AVIF).
+  - Tenant-namespaced SHA-256 idempotency key derivation with zero plaintext logging.
+  - Atomic PostgreSQL `usage_events` recording with `ON CONFLICT (request_id) DO NOTHING` serialization and `409 DUPLICATE_REQUEST` rejection.
+  - Zero billable usage on client disconnects and pipeline failure paths.
 
 - [ ] **Milestone 3: Developer Dashboard for Keys and Usage**
   - Real-time usage event stream visualization.

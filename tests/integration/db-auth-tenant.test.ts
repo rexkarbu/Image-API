@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { db, pool } from "@/db";
-import { user, organizations, organizationMembers, apiKeys, apiKeyAuditEvents } from "@/db/schema";
+import { user, organizations, organizationMembers, apiKeys, apiKeyAuditEvents, usageEvents } from "@/db/schema";
 import { createOrganizationWithMembership, getUserFirstOrganization } from "@/lib/tenant/organizations";
 import {
   createApiKey,
@@ -9,6 +9,9 @@ import {
   rotateApiKey,
   verifyApiKey,
 } from "@/lib/services/api-keys";
+import { POST as transformRoute } from "@/app/v1/images/transform/route";
+import { deriveRequestId } from "@/lib/api/idempotency";
+import sharp from "sharp";
 import { eq, and, sql, inArray } from "drizzle-orm";
 import crypto from "node:crypto";
 import { assertDevelopmentDatabaseSafety } from "@/db/development-safety";
@@ -22,8 +25,9 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
   let orgAId: string = "";
   let orgBId: string = "";
 
-  // Created key IDs for scoped cleanup
+  // Created key IDs and usage IDs for scoped cleanup
   const createdKeyIds: string[] = [];
+  const createdUsageIds: string[] = [];
 
   beforeAll(async () => {
     // 1. Enforce strict non-production environment safety guards
@@ -78,6 +82,9 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
     // Scoped cleanup targeting only the exact test IDs created in this run
     // Delete in reverse FK dependency order: audit events -> api keys -> memberships -> orgs -> users
     try {
+      if (createdUsageIds.length > 0) {
+        await db.delete(usageEvents).where(inArray(usageEvents.id, createdUsageIds));
+      }
       if (createdKeyIds.length > 0) {
         await db.delete(apiKeyAuditEvents).where(inArray(apiKeyAuditEvents.apiKeyId, createdKeyIds));
         await db.delete(apiKeys).where(inArray(apiKeys.id, createdKeyIds));
@@ -545,4 +552,308 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
     const [dbKey] = await db.select().from(apiKeys).where(eq(apiKeys.id, created.key.id));
     expect(dbKey.lastUsedAt).not.toBeNull();
   });
+
+  // =========================================================================
+  // MILESTONE 2: LIVE IMAGE TRANSFORM & ACCURATE USAGE METERING
+  // =========================================================================
+
+  async function generateTestPngBuffer(w = 100, h = 80): Promise<Buffer> {
+    return await sharp({
+      create: {
+        width: w,
+        height: h,
+        channels: 3,
+        background: { r: 120, g: 180, b: 240 },
+      },
+    })
+      .png()
+      .toBuffer();
+  }
+
+  function createTransformRequest(
+    authBearer: string | null,
+    idempotencyKey: string | null,
+    fields: Record<string, string | null>,
+    fileBuffer?: Buffer,
+    fileName = "input.png",
+    fieldName = "file"
+  ): Request {
+    const boundary = "----M2TestBoundary" + crypto.randomUUID().replace(/-/g, "");
+    const chunks: Buffer[] = [];
+
+    for (const [key, val] of Object.entries(fields)) {
+      if (val !== null) {
+        chunks.push(
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${val}\r\n`
+          )
+        );
+      }
+    }
+
+    if (fileBuffer) {
+      chunks.push(
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="${fieldName}"; filename="${fileName}"\r\nContent-Type: image/png\r\n\r\n`
+        )
+      );
+      chunks.push(fileBuffer);
+      chunks.push(Buffer.from("\r\n"));
+    }
+
+    chunks.push(Buffer.from(`--${boundary}--\r\n`));
+    const fullBody = Buffer.concat(chunks);
+
+    const headers: Record<string, string> = {
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      "Content-Length": String(fullBody.length),
+    };
+
+    if (authBearer) {
+      headers["Authorization"] = `Bearer ${authBearer}`;
+    }
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
+
+    return new Request("http://localhost:3000/v1/images/transform", {
+      method: "POST",
+      headers,
+      body: fullBody,
+    });
+  }
+
+  it("processes valid image transformation, returns binary output, and records exact usage_event in PostgreSQL", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const keyRes = await createApiKey(context, { name: "M2 Success Key", scopes: "image:transform" });
+    createdKeyIds.push(keyRes.key.id);
+
+    const idempotencyKey = `idemp-${crypto.randomUUID()}`;
+    const testImage = await generateTestPngBuffer(150, 100);
+
+    const req = createTransformRequest(
+      keyRes.plaintextKey,
+      idempotencyKey,
+      { width: "75", format: "webp", quality: "80" },
+      testImage
+    );
+
+    const response = await transformRoute(req);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/webp");
+    expect(response.headers.get("x-usage-units")).toBe("1");
+    expect(response.headers.get("x-image-width")).toBe("75");
+    expect(response.headers.get("x-image-height")).toBe("50");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-request-id")).not.toBeNull();
+
+    const outputBuffer = Buffer.from(await response.arrayBuffer());
+    expect(outputBuffer.length).toBeGreaterThan(0);
+
+    const outMeta = await sharp(outputBuffer).metadata();
+    expect(outMeta.format).toBe("webp");
+    expect(outMeta.width).toBe(75);
+    expect(outMeta.height).toBe(50);
+
+    // Verify exactly 1 usage_event row recorded in PostgreSQL
+    const expectedRequestId = deriveRequestId(orgAId, idempotencyKey);
+    const usageRows = await db
+      .select()
+      .from(usageEvents)
+      .where(
+        and(
+          eq(usageEvents.organizationId, orgAId),
+          eq(usageEvents.requestId, expectedRequestId)
+        )
+      );
+
+    expect(usageRows.length).toBe(1);
+    createdUsageIds.push(usageRows[0].id);
+
+    expect(usageRows[0].apiKeyId).toBe(keyRes.key.id);
+    expect(usageRows[0].endpoint).toBe("/v1/images/transform");
+    expect(usageRows[0].units).toBe(1);
+    expect(usageRows[0].statusCode).toBe(200);
+  });
+
+  it("handles sequential duplicate request: returns 409 DUPLICATE_REQUEST without creating extra usage rows", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const keyRes = await createApiKey(context, { name: "M2 Seq Duplicate Key", scopes: "image:transform" });
+    createdKeyIds.push(keyRes.key.id);
+
+    const idempotencyKey = `idemp-seq-${crypto.randomUUID()}`;
+    const testImage = await generateTestPngBuffer(80, 80);
+
+    // First request (success)
+    const req1 = createTransformRequest(keyRes.plaintextKey, idempotencyKey, {}, testImage);
+    const res1 = await transformRoute(req1);
+    expect(res1.status).toBe(200);
+
+    // Second request with same idempotency key (duplicate)
+    const req2 = createTransformRequest(keyRes.plaintextKey, idempotencyKey, {}, testImage);
+    const res2 = await transformRoute(req2);
+    expect(res2.status).toBe(409);
+
+    const body2 = await res2.json();
+    expect(body2.error.code).toBe("DUPLICATE_REQUEST");
+
+    // Verify still exactly 1 row in database
+    const expectedRequestId = deriveRequestId(orgAId, idempotencyKey);
+    const usageRows = await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.requestId, expectedRequestId));
+    expect(usageRows.length).toBe(1);
+    createdUsageIds.push(usageRows[0].id);
+  });
+
+  it("handles 5 parallel requests with the same idempotency key: exactly 1 wins (200), 4 get 409, 1 usage row", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const keyRes = await createApiKey(context, { name: "M2 Parallel Deduplication Key", scopes: "image:transform" });
+    createdKeyIds.push(keyRes.key.id);
+
+    const idempotencyKey = `idemp-parallel-${crypto.randomUUID()}`;
+    const testImage = await generateTestPngBuffer(50, 50);
+
+    // Launch 5 concurrent requests with identical idempotency key
+    const responses = await Promise.all([
+      transformRoute(createTransformRequest(keyRes.plaintextKey, idempotencyKey, {}, testImage)),
+      transformRoute(createTransformRequest(keyRes.plaintextKey, idempotencyKey, {}, testImage)),
+      transformRoute(createTransformRequest(keyRes.plaintextKey, idempotencyKey, {}, testImage)),
+      transformRoute(createTransformRequest(keyRes.plaintextKey, idempotencyKey, {}, testImage)),
+      transformRoute(createTransformRequest(keyRes.plaintextKey, idempotencyKey, {}, testImage)),
+    ]);
+
+    const successes = responses.filter((r) => r.status === 200);
+    const duplicates = responses.filter((r) => r.status === 409);
+
+    expect(successes.length).toBe(1);
+    expect(duplicates.length).toBe(4);
+
+    // Check DB: exactly 1 row created
+    const expectedRequestId = deriveRequestId(orgAId, idempotencyKey);
+    const usageRows = await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.requestId, expectedRequestId));
+    expect(usageRows.length).toBe(1);
+    createdUsageIds.push(usageRows[0].id);
+  });
+
+  it("allows the same raw idempotency key across different organizations (tenant namespaced)", async () => {
+    const keyA = await createApiKey(
+      { organizationId: orgAId, userId: userAId, role: "owner" },
+      { name: "Org A Key", scopes: "image:transform" }
+    );
+    createdKeyIds.push(keyA.key.id);
+
+    const keyB = await createApiKey(
+      { organizationId: orgBId, userId: userBId, role: "owner" },
+      { name: "Org B Key", scopes: "image:transform" }
+    );
+    createdKeyIds.push(keyB.key.id);
+
+    const sharedIdempotencyKey = `idemp-shared-${crypto.randomUUID()}`;
+    const testImage = await generateTestPngBuffer(40, 40);
+
+    const reqA = createTransformRequest(keyA.plaintextKey, sharedIdempotencyKey, {}, testImage);
+    const resA = await transformRoute(reqA);
+    expect(resA.status).toBe(200);
+
+    const reqB = createTransformRequest(keyB.plaintextKey, sharedIdempotencyKey, {}, testImage);
+    const resB = await transformRoute(reqB);
+    expect(resB.status).toBe(200);
+
+    // Both succeeded with different derived request_id hashes in DB
+    const hashA = deriveRequestId(orgAId, sharedIdempotencyKey);
+    const hashB = deriveRequestId(orgBId, sharedIdempotencyKey);
+    expect(hashA).not.toBe(hashB);
+
+    const rowsA = await db.select().from(usageEvents).where(eq(usageEvents.requestId, hashA));
+    const rowsB = await db.select().from(usageEvents).where(eq(usageEvents.requestId, hashB));
+    expect(rowsA.length).toBe(1);
+    expect(rowsB.length).toBe(1);
+    createdUsageIds.push(rowsA[0].id, rowsB[0].id);
+  });
+
+  it("ensures zero usage_events are recorded on authentication failure (invalid, revoked, or expired key)", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const keyRes = await createApiKey(context, { name: "Key For Failure Tests", scopes: "image:transform" });
+    createdKeyIds.push(keyRes.key.id);
+
+    const testImage = await generateTestPngBuffer(30, 30);
+
+    // 1. Invalid Bearer
+    const resInvalid = await transformRoute(
+      createTransformRequest("img_live_invalidkey123456789012345678901234567890", `idemp-${crypto.randomUUID()}`, {}, testImage)
+    );
+    expect(resInvalid.status).toBe(401);
+
+    // 2. Revoked Key
+    await revokeApiKey(context, keyRes.key.id);
+    const resRevoked = await transformRoute(
+      createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, testImage)
+    );
+    expect(resRevoked.status).toBe(401);
+
+    // Confirm 0 usage rows created
+    const rows = await db.select().from(usageEvents).where(eq(usageEvents.apiKeyId, keyRes.key.id));
+    expect(rows.length).toBe(0);
+  });
+
+  it("ensures zero usage_events are recorded on invalid options or unsupported input", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const keyRes = await createApiKey(context, { name: "Key For Bad Requests", scopes: "image:transform" });
+    createdKeyIds.push(keyRes.key.id);
+
+    const testImage = await generateTestPngBuffer(30, 30);
+
+    // 1. Invalid option: PNG with quality
+    const resBadOptions = await transformRoute(
+      createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, { format: "png", quality: "80" }, testImage)
+    );
+    expect(resBadOptions.status).toBe(400);
+
+    // 2. Unsupported format: Valid SVG (detected as SVG -> 415)
+    const svgBuffer = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect width="50" height="50" fill="red"/></svg>');
+    const resSvg = await transformRoute(
+      createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, svgBuffer)
+    );
+    expect(resSvg.status).toBe(415);
+
+    // 3. Corrupt image bytes (422 UNPROCESSABLE_IMAGE)
+    const corruptBuffer = Buffer.from("not-an-image-corrupt-data");
+    const resCorrupt = await transformRoute(
+      createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, corruptBuffer)
+    );
+    expect(resCorrupt.status).toBe(422);
+
+    // Confirm 0 usage rows created
+    const rows = await db.select().from(usageEvents).where(eq(usageEvents.apiKeyId, keyRes.key.id));
+    expect(rows.length).toBe(0);
+  });
+
+  it("enforces multi-tenant query isolation on usage_events", async () => {
+    // Org A queries usage events scoped to orgAId
+    const orgARows = await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.organizationId, orgAId));
+
+    // Org B queries usage events scoped to orgBId
+    const orgBRows = await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.organizationId, orgBId));
+
+    // Ensure no cross-tenant leakage
+    for (const r of orgARows) {
+      expect(r.organizationId).toBe(orgAId);
+    }
+    for (const r of orgBRows) {
+      expect(r.organizationId).toBe(orgBId);
+    }
+  });
 });
+
