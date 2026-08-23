@@ -2,6 +2,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as dotenv from "dotenv";
+import { validatePostgresUrlSecurity } from "./ssl-validation";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
@@ -13,6 +14,13 @@ async function runMigrations() {
     console.error(
       "❌ Migration execution failed: DIRECT_DATABASE_URL is required for database migrations. Falling back to pooled DATABASE_URL is not permitted."
     );
+    process.exit(1);
+  }
+
+  try {
+    validatePostgresUrlSecurity(directConnectionString, "DIRECT_DATABASE_URL");
+  } catch (err) {
+    console.error("❌ Migration security check failed:", (err as Error).message);
     process.exit(1);
   }
 

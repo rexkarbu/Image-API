@@ -67,8 +67,8 @@ cp .env.example .env.local
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `DATABASE_URL` | PostgreSQL pooled connection string (runtime) | `postgres://user:pass@ep-xyz-pooler.region.neon.tech/neondb?sslmode=require` |
-| `DIRECT_DATABASE_URL` | PostgreSQL direct unpooled connection (migrations) | `postgres://user:pass@ep-xyz.region.neon.tech/neondb?sslmode=require` |
+| `DATABASE_URL` | PostgreSQL pooled connection string (runtime) | `postgres://user:pass@ep-xyz-pooler.region.neon.tech/neondb?sslmode=verify-full` |
+| `DIRECT_DATABASE_URL` | PostgreSQL direct unpooled connection (migrations) | `postgres://user:pass@ep-xyz.region.neon.tech/neondb?sslmode=verify-full` |
 | `BETTER_AUTH_SECRET` | Secret key for Better Auth (min 32 chars) | `generate-using-crypto-random-32-bytes` |
 | `BETTER_AUTH_URL` | Canonical Better Auth base URL | `http://localhost:3000` |
 | `NEXT_PUBLIC_APP_URL` | Application public URL | `http://localhost:3000` |
@@ -124,7 +124,7 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (189 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite (205 tests).
 - `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (23 tests).
 - `pnpm verify:http`: Runs real HTTP E2E verification of `POST /v1/images/transform` against running server.
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.

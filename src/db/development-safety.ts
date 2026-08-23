@@ -8,6 +8,10 @@
  * Refuses execution in production, unverified hosts, or mismatched configurations.
  */
 
+import { validatePostgresUrlSecurity } from "./ssl-validation";
+
+export { validatePostgresUrlSecurity };
+
 export interface SafetyEnv {
   NODE_ENV?: string;
   VERCEL_ENV?: string;
@@ -98,31 +102,17 @@ export function validateDevelopmentDatabaseSafety(
     );
   }
 
+  // 1. Enforce strict PostgreSQL TLS security validation
+  validatePostgresUrlSecurity(dbUrl, "DATABASE_URL");
+  validatePostgresUrlSecurity(directUrl, "DIRECT_DATABASE_URL");
+
   let parsedDb: URL;
   let parsedDirect: URL;
   try {
     parsedDb = new URL(dbUrl);
-  } catch {
-    throw new Error("Safety Check Failed: DATABASE_URL is not a valid URL.");
-  }
-
-  try {
     parsedDirect = new URL(directUrl);
   } catch {
-    throw new Error("Safety Check Failed: DIRECT_DATABASE_URL is not a valid URL.");
-  }
-
-  const validProtocols = ["postgres:", "postgresql:"];
-  if (!validProtocols.includes(parsedDb.protocol)) {
-    throw new Error(
-      `Safety Check Failed: DATABASE_URL protocol must be postgres: or postgresql:, got '${parsedDb.protocol}'.`
-    );
-  }
-
-  if (!validProtocols.includes(parsedDirect.protocol)) {
-    throw new Error(
-      `Safety Check Failed: DIRECT_DATABASE_URL protocol must be postgres: or postgresql:, got '${parsedDirect.protocol}'.`
-    );
+    throw new Error("Safety Check Failed: URL parsing error.");
   }
 
   const dbEndpoint = extractNeonEndpointId(parsedDb.hostname);

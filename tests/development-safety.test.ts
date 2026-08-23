@@ -7,8 +7,8 @@ import {
 
 describe("Development Database Safety Guard (Pure Unit Tests)", () => {
   const validDevEndpoint = "ep-test-development-12345";
-  const validPooledUrl = `postgresql://user:pass@${validDevEndpoint}-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`;
-  const validDirectUrl = `postgresql://user:pass@${validDevEndpoint}.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`;
+  const validPooledUrl = `postgresql://user:pass@${validDevEndpoint}-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full`;
+  const validDirectUrl = `postgresql://user:pass@${validDevEndpoint}.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full`;
 
   const createValidEnv = (): SafetyEnv => ({
     NODE_ENV: "development",
@@ -56,8 +56,8 @@ describe("Development Database Safety Guard (Pure Unit Tests)", () => {
 
     it("accepts postgres: protocol prefix as valid", () => {
       const env = createValidEnv();
-      env.DATABASE_URL = `postgres://user:pass@${validDevEndpoint}-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`;
-      env.DIRECT_DATABASE_URL = `postgres://user:pass@${validDevEndpoint}.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`;
+      env.DATABASE_URL = `postgres://user:pass@${validDevEndpoint}-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full`;
+      env.DIRECT_DATABASE_URL = `postgres://user:pass@${validDevEndpoint}.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full`;
       const result = validateDevelopmentDatabaseSafety(env);
       expect(result.isDevelopmentVerified).toBe(true);
     });
@@ -107,9 +107,25 @@ describe("Development Database Safety Guard (Pure Unit Tests)", () => {
       );
     });
 
+    it("rejects when DATABASE_URL has a deprecated sslmode=require", () => {
+      const env = createValidEnv();
+      env.DATABASE_URL = `postgresql://user:pass@${validDevEndpoint}-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`;
+      expect(() => validateDevelopmentDatabaseSafety(env)).toThrow(
+        /Must be strictly 'sslmode=verify-full'/
+      );
+    });
+
+    it("rejects when DIRECT_DATABASE_URL has a deprecated sslmode=require", () => {
+      const env = createValidEnv();
+      env.DIRECT_DATABASE_URL = `postgresql://user:pass@${validDevEndpoint}.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`;
+      expect(() => validateDevelopmentDatabaseSafety(env)).toThrow(
+        /Must be strictly 'sslmode=verify-full'/
+      );
+    });
+
     it("rejects when DATABASE_URL has a different Neon endpoint ID", () => {
       const env = createValidEnv();
-      env.DATABASE_URL = "postgresql://user:pass@ep-different-endpoint-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
+      env.DATABASE_URL = "postgresql://user:pass@ep-different-endpoint-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full";
       expect(() => validateDevelopmentDatabaseSafety(env)).toThrow(
         /DATABASE_URL endpoint ID does not match pinned DEVELOPMENT_DATABASE_ENDPOINT_ID/
       );
@@ -117,7 +133,7 @@ describe("Development Database Safety Guard (Pure Unit Tests)", () => {
 
     it("rejects when DIRECT_DATABASE_URL has a different Neon endpoint ID", () => {
       const env = createValidEnv();
-      env.DIRECT_DATABASE_URL = "postgresql://user:pass@ep-different-endpoint.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
+      env.DIRECT_DATABASE_URL = "postgresql://user:pass@ep-different-endpoint.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full";
       expect(() => validateDevelopmentDatabaseSafety(env)).toThrow(
         /DIRECT_DATABASE_URL endpoint ID does not match pinned DEVELOPMENT_DATABASE_ENDPOINT_ID/
       );
@@ -126,8 +142,8 @@ describe("Development Database Safety Guard (Pure Unit Tests)", () => {
     it("rejects when DATABASE_URL and DIRECT_DATABASE_URL endpoints do not match each other", () => {
       const env = createValidEnv();
       env.DEVELOPMENT_DATABASE_ENDPOINT_ID = "ep-endpoint-a";
-      env.DATABASE_URL = "postgresql://user:pass@ep-endpoint-a-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
-      env.DIRECT_DATABASE_URL = "postgresql://user:pass@ep-endpoint-b.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
+      env.DATABASE_URL = "postgresql://user:pass@ep-endpoint-a-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full";
+      env.DIRECT_DATABASE_URL = "postgresql://user:pass@ep-endpoint-b.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=verify-full";
       expect(() => validateDevelopmentDatabaseSafety(env)).toThrow();
     });
 
@@ -149,7 +165,7 @@ describe("Development Database Safety Guard (Pure Unit Tests)", () => {
 
     it("rejects arbitrary or unknown hostnames even if other parameters match", () => {
       const env = createValidEnv();
-      env.DATABASE_URL = "postgresql://user:pass@production-database.rds.amazonaws.com:5432/neondb";
+      env.DATABASE_URL = "postgresql://user:pass@production-database.rds.amazonaws.com:5432/neondb?sslmode=verify-full";
       expect(() => validateDevelopmentDatabaseSafety(env)).toThrow(
         /DATABASE_URL hostname does not end with '\.neon\.tech'/
       );
@@ -157,7 +173,7 @@ describe("Development Database Safety Guard (Pure Unit Tests)", () => {
 
     it("rejects when database pathnames differ between runtime and migration URLs", () => {
       const env = createValidEnv();
-      env.DIRECT_DATABASE_URL = `postgresql://user:pass@${validDevEndpoint}.c-3.ap-southeast-1.aws.neon.tech/otherdb?sslmode=require`;
+      env.DIRECT_DATABASE_URL = `postgresql://user:pass@${validDevEndpoint}.c-3.ap-southeast-1.aws.neon.tech/otherdb?sslmode=verify-full`;
       expect(() => validateDevelopmentDatabaseSafety(env)).toThrow(
         /point to different database paths/
       );

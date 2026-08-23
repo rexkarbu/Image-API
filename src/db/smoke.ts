@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import * as dotenv from "dotenv";
+import { validatePostgresUrlSecurity } from "./ssl-validation";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
@@ -21,6 +22,14 @@ async function smokeTest() {
 
   if (!connectionString) {
     console.error("❌ Database smoke test failed: DATABASE_URL is not set.");
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    validatePostgresUrlSecurity(connectionString, "DATABASE_URL");
+  } catch (err) {
+    console.error("❌ Database security check failed:", (err as Error).message);
     process.exitCode = 1;
     return;
   }

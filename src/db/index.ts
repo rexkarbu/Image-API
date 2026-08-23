@@ -1,6 +1,7 @@
 import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema";
+import { validatePostgresUrlSecurity } from "./ssl-validation";
 
 /**
  * Reusable server-side PostgreSQL client.
@@ -30,8 +31,11 @@ function getDatabasePool(): Pool {
     return globalThis.__pgPool;
   }
 
+  const connString = getConnectionString();
+  validatePostgresUrlSecurity(connString, "DATABASE_URL");
+
   const poolInstance = new Pool({
-    connectionString: getConnectionString(),
+    connectionString: connString,
   });
 
   if (process.env.NODE_ENV !== "production") {
