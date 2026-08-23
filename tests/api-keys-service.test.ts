@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { canManageApiKeys } from "@/lib/crypto/api-keys";
-import { ApiKeyDto } from "@/lib/services/api-keys";
+import type { ApiKeyDto } from "@/types/api-keys";
 
 describe("API Key Service Logic & Authorization Unit Tests", () => {
   it("enforces that safe ApiKeyDto never includes keyHash property", () => {

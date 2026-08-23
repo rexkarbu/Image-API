@@ -6,6 +6,13 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
 
+# Override esbuild specifically for drizzle-kit subdependencies to resolve GHSA-67mh-4wv8-2f99 (esbuild <=0.24.2)
+# until upstream drizzle-kit / esbuild-kit packages update their bundled esbuild versions.
+overrides:
+  drizzle-kit>esbuild: ">=0.24.3"
+  "@esbuild-kit/core-utils>esbuild": ">=0.24.3"
+  "esbuild-register>esbuild": ">=0.24.3"
+
 onlyBuiltDependencies:
   - esbuild
   - sharp

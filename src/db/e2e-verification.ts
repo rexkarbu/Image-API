@@ -1,3 +1,13 @@
+import Module from "node:module";
+// Allow standalone Node runner to import server-only modules
+// @ts-ignore
+const originalRequire = Module.prototype.require;
+// @ts-ignore
+Module.prototype.require = function (id: string) {
+  if (id === "server-only") return {};
+  return Reflect.apply(originalRequire, this, [id]);
+};
+
 import { Pool } from "pg";
 import * as dotenv from "dotenv";
 import crypto from "node:crypto";
@@ -51,7 +61,7 @@ async function runE2E() {
   const createdKeyIds: string[] = [];
 
   console.log("==================================================");
-  console.log("🚀 Starting M1 Authentication, Onboarding & API-Key Lifecycle E2E");
+  console.log("🚀 Starting Direct Lifecycle Service Verification (Non-UI)");
   console.log("==================================================");
 
   try {

@@ -9,6 +9,7 @@ export default defineConfig({
     exclude: ["tests/integration/**", "node_modules/**"],
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "server-only": path.resolve(__dirname, "./tests/mocks/empty.ts"),
     },
   },
 });

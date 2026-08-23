@@ -56,6 +56,8 @@ const EXPECTED_INDEXES = [
   "api_keys_created_by_idx",
   "api_key_audit_events_org_created_idx",
   "api_key_audit_events_key_created_idx",
+  "api_key_audit_events_key_revoked_idx",
+  "api_key_audit_events_related_rotation_idx",
   "usage_events_org_created_idx",
   "usage_events_key_created_idx",
 ];
@@ -147,7 +149,7 @@ async function verifyDbMetadata() {
     }
     console.log(`   ✅ All ${EXPECTED_FKS.length} foreign key delete rules verified.`);
 
-    // 3. Unique Constraint assertions
+    // 3. Unique Constraints
     const uqRes = await pool.query<{
       table_name: string;
       constraint_name: string;
@@ -202,8 +204,11 @@ async function verifyDbMetadata() {
       { table: "usage_events", pattern: "units > 0", name: "usage_events_units_positive" },
       { table: "api_key_audit_events", pattern: "created", name: "api_key_audit_events_type_check" },
       { table: "api_keys", pattern: "active", name: "api_keys_status_check" },
-      { table: "api_keys", pattern: "64", name: "api_keys_key_hash_length" },
-      { table: "api_keys", pattern: "img_live_", name: "api_keys_key_prefix_check" },
+      { table: "api_keys", pattern: "[0-9a-f]{64}", name: "api_keys_key_hash_format" },
+      { table: "api_keys", pattern: "img_live_", name: "api_keys_key_prefix_format" },
+      { table: "api_keys", pattern: "revoked_at", name: "api_keys_status_revoked_consistency" },
+      { table: "api_keys", pattern: "image:transform", name: "api_keys_scopes_check" },
+      { table: "api_keys", pattern: "expires_at", name: "api_keys_expires_at_check" },
     ];
 
     for (const check of requiredChecks) {
@@ -238,22 +243,36 @@ async function verifyDbMetadata() {
     }
     console.log("   ✅ Zero plaintext key columns detected in api_keys and api_key_audit_events.");
 
-    // 6. Index assertions
-    const indexesRes = await pool.query<{ tablename: string; indexname: string }>(`
-      SELECT tablename, indexname
+    // 6. Database Indexes (including partial unique indexes)
+    const indexesRes = await pool.query<{ tablename: string; indexname: string; indexdef: string }>(`
+      SELECT tablename, indexname, indexdef
       FROM pg_indexes
       WHERE schemaname = 'public'
       ORDER BY tablename, indexname;
     `);
 
-    console.log("\n6. Database Indexes:");
+    console.log("\n6. Database Indexes & Partial Unique Constraints:");
     const existingIndexNames = indexesRes.rows.map((r) => r.indexname);
     for (const expectedIdx of EXPECTED_INDEXES) {
       if (!existingIndexNames.includes(expectedIdx)) {
         throw new Error(`Metadata Assertion Failed: Missing index '${expectedIdx}' in PostgreSQL schema.`);
       }
     }
-    console.log(`   ✅ All ${EXPECTED_INDEXES.length} expected query indexes verified.`);
+
+    // Verify partial unique indexes have WHERE clauses
+    const revokedIdx = indexesRes.rows.find((r) => r.indexname === "api_key_audit_events_key_revoked_idx");
+    if (!revokedIdx || !revokedIdx.indexdef.includes("WHERE (event_type = 'revoked'::text)")) {
+      throw new Error("Metadata Assertion Failed: 'api_key_audit_events_key_revoked_idx' is missing required partial WHERE predicate.");
+    }
+    console.log(`   - ${revokedIdx.indexname} -> ${revokedIdx.indexdef}`);
+
+    const rotationIdx = indexesRes.rows.find((r) => r.indexname === "api_key_audit_events_related_rotation_idx");
+    if (!rotationIdx || !rotationIdx.indexdef.includes("WHERE (event_type = 'rotation_created'::text)")) {
+      throw new Error("Metadata Assertion Failed: 'api_key_audit_events_related_rotation_idx' is missing required partial WHERE predicate.");
+    }
+    console.log(`   - ${rotationIdx.indexname} -> ${rotationIdx.indexdef}`);
+
+    console.log(`   ✅ All ${EXPECTED_INDEXES.length} expected query and partial unique indexes verified.`);
 
     console.log("\n==================================================");
     console.log("🎉 ALL POSTGRESQL METADATA ASSERTIONS PASSED!");

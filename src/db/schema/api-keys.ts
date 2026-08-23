@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, index, check } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, index, uniqueIndex, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { organizations } from "./organizations";
 import { user } from "./auth";
@@ -32,12 +32,13 @@ export const apiKeys = pgTable(
     index("api_keys_active_lookup_idx").on(table.keyHash, table.status),
     index("api_keys_created_by_idx").on(table.createdByUserId),
     check("api_keys_status_check", sql`"status" IN ('active', 'revoked')`),
-    check("api_keys_key_hash_length", sql`length("key_hash") = 64`),
-    check("api_keys_key_prefix_check", sql`"key_prefix" LIKE 'img_live_%'`),
+    check("api_keys_key_hash_format", sql`"key_hash" ~ '^[0-9a-f]{64}$'`),
+    check("api_keys_key_prefix_format", sql`"key_prefix" ~ '^img_live_[A-Za-z0-9_-]{8}$'`),
     check(
-      "api_keys_revoked_at_check",
-      sql`("status" = 'revoked' AND "revoked_at" IS NOT NULL) OR ("status" = 'active')`
+      "api_keys_status_revoked_consistency",
+      sql`("status" = 'active' AND "revoked_at" IS NULL) OR ("status" = 'revoked' AND "revoked_at" IS NOT NULL)`
     ),
+    check("api_keys_scopes_check", sql`"scopes" = 'image:transform'`),
     check(
       "api_keys_expires_at_check",
       sql`"expires_at" IS NULL OR "expires_at" > "created_at"`
@@ -70,6 +71,12 @@ export const apiKeyAuditEvents = pgTable(
   (table) => [
     index("api_key_audit_events_org_created_idx").on(table.organizationId, table.createdAt),
     index("api_key_audit_events_key_created_idx").on(table.apiKeyId, table.createdAt),
+    uniqueIndex("api_key_audit_events_key_revoked_idx")
+      .on(table.apiKeyId)
+      .where(sql`"event_type" = 'revoked'`),
+    uniqueIndex("api_key_audit_events_related_rotation_idx")
+      .on(table.relatedApiKeyId)
+      .where(sql`"event_type" = 'rotation_created'`),
     check(
       "api_key_audit_events_type_check",
       sql`"event_type" IN ('created', 'revoked', 'rotation_created', 'expiration_scheduled')`

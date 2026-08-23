@@ -1,3 +1,5 @@
+import "server-only";
+
 import { db } from "@/db";
 import { apiKeys, apiKeyAuditEvents, user } from "@/db/schema";
 import {
@@ -7,7 +9,6 @@ import {
   canManageApiKeys,
   isValidApiKeyFormat,
   hashApiKey,
-  DerivedApiKeyStatus,
 } from "@/lib/crypto/api-keys";
 import {
   apiKeyNameSchema,
@@ -15,41 +16,36 @@ import {
   ApiKeyStatusFilter,
   ApiKeyRotationMode,
 } from "@/lib/validations/api-keys";
-import { eq, and, sql, desc, asc } from "drizzle-orm";
+import {
+  ApiKeyDto,
+  CreateApiKeyResult,
+  RotateApiKeyResult,
+  ApiKeyErrorCode,
+} from "@/types/api-keys";
+import { eq, and, sql, desc } from "drizzle-orm";
 import crypto from "node:crypto";
 
-export interface ApiKeyDto {
-  id: string;
-  organizationId: string;
-  name: string;
-  keyPrefix: string;
-  displayPrefix: string;
-  scopes: string;
-  status: DerivedApiKeyStatus;
-  rawStatus: "active" | "revoked";
-  lastUsedAt: string | null;
-  expiresAt: string | null;
-  revokedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-  createdByUserName?: string | null;
-}
+export class ApiKeyServiceError extends Error {
+  readonly code: ApiKeyErrorCode;
 
-export interface CreateApiKeyResult {
-  key: ApiKeyDto;
-  plaintextKey: string;
-}
-
-export interface RotateApiKeyResult {
-  newKey: ApiKeyDto;
-  oldKey: ApiKeyDto;
-  plaintextKey: string;
+  constructor(code: ApiKeyErrorCode, message: string) {
+    super(message);
+    this.name = "ApiKeyServiceError";
+    this.code = code;
+  }
 }
 
 export interface VerifiedApiKeyIdentity {
   apiKeyId: string;
   organizationId: string;
   scopes: string[];
+}
+
+function toIsoString(val: Date | string | null | undefined): string | null {
+  if (!val) return null;
+  if (val instanceof Date) return val.toISOString();
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 /**
@@ -64,11 +60,11 @@ function toApiKeyDto(
     keyPrefix: string;
     scopes: string;
     status: string;
-    lastUsedAt: Date | null;
-    expiresAt: Date | null;
-    revokedAt: Date | null;
-    createdAt: Date;
-    updatedAt: Date;
+    lastUsedAt: Date | string | null;
+    expiresAt: Date | string | null;
+    revokedAt: Date | string | null;
+    createdAt: Date | string;
+    updatedAt: Date | string;
   },
   creatorName?: string | null
 ): ApiKeyDto {
@@ -83,11 +79,11 @@ function toApiKeyDto(
     scopes: row.scopes,
     status: derivedStatus,
     rawStatus: row.status as "active" | "revoked",
-    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
-    expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
-    revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
+    lastUsedAt: toIsoString(row.lastUsedAt),
+    expiresAt: toIsoString(row.expiresAt),
+    revokedAt: toIsoString(row.revokedAt),
+    createdAt: toIsoString(row.createdAt) || new Date().toISOString(),
+    updatedAt: toIsoString(row.updatedAt) || new Date().toISOString(),
     createdByUserName: creatorName ?? null,
   };
 }
@@ -106,7 +102,10 @@ export async function createApiKey(
   input: CreateApiKeyInput
 ): Promise<CreateApiKeyResult> {
   if (!canManageApiKeys(trustedContext.role)) {
-    throw new Error("Unauthorized: Only organization owners and admins can create API keys.");
+    throw new ApiKeyServiceError(
+      "FORBIDDEN",
+      "Forbidden: You do not have permission to create API keys in this organization."
+    );
   }
 
   const validatedName = apiKeyNameSchema.parse(input.name);
@@ -124,7 +123,7 @@ export async function createApiKey(
         name: validatedName,
         keyPrefix,
         keyHash,
-        scopes: input.scopes || "image:transform",
+        scopes: "image:transform",
         status: "active",
         createdAt: now,
         updatedAt: now,
@@ -206,24 +205,24 @@ export async function listApiKeys(
     return dto.status === filter;
   });
 
-  // Sort order: active first, then expired, then revoked; newest createdAt within each group
-  const statusRank: Record<DerivedApiKeyStatus, number> = {
+  const statusRank: Record<string, number> = {
     active: 1,
     expired: 2,
     revoked: 3,
   };
 
   return filtered.sort((a, b) => {
-    const rankDiff = statusRank[a.status] - statusRank[b.status];
+    const rankDiff = (statusRank[a.status] || 99) - (statusRank[b.status] || 99);
     if (rankDiff !== 0) return rankDiff;
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });
 }
 
 /**
- * Revokes an API key idempotently.
+ * Revokes an API key with concurrency safety.
  * Scoped strictly to the trusted organization ID.
- * Appends a single 'revoked' audit event on state transition.
+ * Uses PostgreSQL row-locking to serialize concurrent requests.
+ * Appends exactly one 'revoked' audit event on state transition.
  */
 export async function revokeApiKey(
   trustedContext: {
@@ -234,28 +233,58 @@ export async function revokeApiKey(
   keyId: string
 ): Promise<ApiKeyDto> {
   if (!canManageApiKeys(trustedContext.role)) {
-    throw new Error("Unauthorized: Only organization owners and admins can revoke API keys.");
+    throw new ApiKeyServiceError(
+      "FORBIDDEN",
+      "Forbidden: You do not have permission to revoke API keys in this organization."
+    );
   }
 
   const now = new Date();
 
   const updatedRow = await db.transaction(async (tx) => {
-    // 1. Fetch key strictly within trusted organization
-    const [existing] = await tx
-      .select()
-      .from(apiKeys)
-      .where(and(eq(apiKeys.id, keyId), eq(apiKeys.organizationId, trustedContext.organizationId)));
+    // 1. Fetch key strictly within trusted organization with row lock
+    const lockedRows = await tx.execute<{
+      id: string;
+      organization_id: string;
+      name: string;
+      key_prefix: string;
+      scopes: string;
+      status: string;
+      last_used_at: Date | null;
+      expires_at: Date | null;
+      revoked_at: Date | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      sql`SELECT id, organization_id, name, key_prefix, scopes, status, last_used_at, expires_at, revoked_at, created_at, updated_at
+          FROM api_keys
+          WHERE id = ${keyId} AND organization_id = ${trustedContext.organizationId}
+          FOR UPDATE`
+    );
 
+    const existing = lockedRows.rows[0];
     if (!existing) {
-      throw new Error("API key not found.");
+      throw new ApiKeyServiceError("NOT_FOUND_OR_UNAVAILABLE", "API key not found.");
     }
 
     // Idempotent: if already revoked, return existing without new audit event
     if (existing.status === "revoked") {
-      return existing;
+      return {
+        id: existing.id,
+        organizationId: existing.organization_id,
+        name: existing.name,
+        keyPrefix: existing.key_prefix,
+        scopes: existing.scopes,
+        status: existing.status,
+        lastUsedAt: existing.last_used_at,
+        expiresAt: existing.expires_at,
+        revokedAt: existing.revoked_at,
+        createdAt: existing.created_at,
+        updatedAt: existing.updated_at,
+      };
     }
 
-    // 2. Perform revocation
+    // 2. Perform revocation update
     const [updated] = await tx
       .update(apiKeys)
       .set({
@@ -266,7 +295,7 @@ export async function revokeApiKey(
       .where(and(eq(apiKeys.id, keyId), eq(apiKeys.organizationId, trustedContext.organizationId)))
       .returning();
 
-    // 3. Record audit event
+    // 3. Record audit event (guaranteed unique per key by partial unique index)
     await tx.insert(apiKeyAuditEvents).values({
       id: crypto.randomUUID(),
       organizationId: trustedContext.organizationId,
@@ -283,12 +312,9 @@ export async function revokeApiKey(
 }
 
 /**
- * Rotates an active, usable API key.
- * Supports:
- * - 'immediate': Revokes old key immediately and activates replacement key.
- * - 'grace_24h': Keeps old key active with a 24-hour expiration window.
- *
- * Atomically executes within a database transaction with audit logging.
+ * Rotates an active, usable API key with concurrency safety.
+ * Uses a PostgreSQL row lock on the source key to prevent race conditions.
+ * Ensures at most one direct replacement per key.
  */
 export async function rotateApiKey(
   trustedContext: {
@@ -300,30 +326,65 @@ export async function rotateApiKey(
   mode: ApiKeyRotationMode
 ): Promise<RotateApiKeyResult> {
   if (!canManageApiKeys(trustedContext.role)) {
-    throw new Error("Unauthorized: Only organization owners and admins can rotate API keys.");
+    throw new ApiKeyServiceError(
+      "FORBIDDEN",
+      "Forbidden: You do not have permission to rotate API keys in this organization."
+    );
   }
 
   const now = new Date();
-  const { plaintextKey, keyPrefix, keyHash } = generateFullApiKey();
   const newKeyId = crypto.randomUUID();
 
+  // Execute atomic rotation inside transaction with source row lock
   const result = await db.transaction(async (tx) => {
-    // 1. Fetch old key strictly within organization
-    const [oldKey] = await tx
-      .select()
-      .from(apiKeys)
-      .where(and(eq(apiKeys.id, keyId), eq(apiKeys.organizationId, trustedContext.organizationId)));
+    // 1. Lock source row within organization
+    const lockedRows = await tx.execute<{
+      id: string;
+      organization_id: string;
+      name: string;
+      key_prefix: string;
+      scopes: string;
+      status: string;
+      last_used_at: Date | null;
+      expires_at: Date | null;
+      revoked_at: Date | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      sql`SELECT id, organization_id, name, key_prefix, scopes, status, last_used_at, expires_at, revoked_at, created_at, updated_at
+          FROM api_keys
+          WHERE id = ${keyId} AND organization_id = ${trustedContext.organizationId}
+          FOR UPDATE`
+    );
 
+    const oldKey = lockedRows.rows[0];
     if (!oldKey) {
-      throw new Error("API key not found.");
+      throw new ApiKeyServiceError("NOT_FOUND_OR_UNAVAILABLE", "API key not found.");
     }
 
-    const currentStatus = deriveApiKeyStatus(oldKey.status, oldKey.expiresAt, now);
+    const currentStatus = deriveApiKeyStatus(oldKey.status, oldKey.expires_at, now);
     if (currentStatus !== "active") {
-      throw new Error(`Cannot rotate an API key that is already ${currentStatus}.`);
+      throw new ApiKeyServiceError(
+        "CONFLICT",
+        `Cannot rotate an API key that is already ${currentStatus}.`
+      );
     }
 
-    // 2. Insert new replacement key
+    // 2. Check if this key already produced a replacement
+    const existingReplacements = await tx.execute<{ id: string }>(
+      sql`SELECT id FROM api_key_audit_events
+          WHERE related_api_key_id = ${keyId} AND event_type = 'rotation_created'
+          LIMIT 1`
+    );
+
+    if (existingReplacements.rows.length > 0) {
+      throw new ApiKeyServiceError("CONFLICT", "API key has already been rotated.");
+    }
+
+    // 3. Generate new key credentials only after lock & validation
+    const { plaintextKey, keyPrefix, keyHash } = generateFullApiKey();
+
+    // 4. Insert replacement key
     const [newKeyRow] = await tx
       .insert(apiKeys)
       .values({
@@ -340,7 +401,7 @@ export async function rotateApiKey(
       })
       .returning();
 
-    // 3. Record rotation_created audit event
+    // 5. Record rotation_created audit event (enforced unique per related_api_key_id)
     await tx.insert(apiKeyAuditEvents).values({
       id: crypto.randomUUID(),
       organizationId: trustedContext.organizationId,
@@ -351,10 +412,22 @@ export async function rotateApiKey(
       createdAt: now,
     });
 
-    let updatedOldKeyRow = oldKey;
+    let updatedOldKeyRow = {
+      id: oldKey.id,
+      organizationId: oldKey.organization_id,
+      name: oldKey.name,
+      keyPrefix: oldKey.key_prefix,
+      scopes: oldKey.scopes,
+      status: oldKey.status,
+      lastUsedAt: oldKey.last_used_at,
+      expiresAt: oldKey.expires_at,
+      revokedAt: oldKey.revoked_at,
+      createdAt: oldKey.created_at,
+      updatedAt: oldKey.updated_at,
+    };
 
     if (mode === "immediate") {
-      // Immediate mode: revoke old key now
+      // Immediate mode: revoke old key
       const [revokedOld] = await tx
         .update(apiKeys)
         .set({
@@ -380,8 +453,8 @@ export async function rotateApiKey(
       // Grace 24h mode: set expiry to min(existingExpiry, now + 24h)
       const graceExpiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
       const targetExpiry =
-        oldKey.expiresAt && oldKey.expiresAt.getTime() < graceExpiry.getTime()
-          ? oldKey.expiresAt
+        oldKey.expires_at && oldKey.expires_at.getTime() < graceExpiry.getTime()
+          ? oldKey.expires_at
           : graceExpiry;
 
       const [graceOld] = await tx
@@ -409,28 +482,29 @@ export async function rotateApiKey(
     return {
       newKeyRow,
       updatedOldKeyRow,
+      plaintextKey,
     };
   });
 
   return {
     newKey: toApiKeyDto(result.newKeyRow),
     oldKey: toApiKeyDto(result.updatedOldKeyRow),
-    plaintextKey,
+    plaintextKey: result.plaintextKey,
   };
 }
 
 /**
- * Server-only API key verification service foundation.
+ * Server-only API key verification foundation.
  * Validates format, SHA-256 hash lookup, active status, and required scope.
  * Employs a generic error on any failure to avoid disclosing key existence or status.
- * Throttles lastUsedAt write to at most once per 5 minutes.
+ * Executes atomic, tenant-scoped throttled update of last_used_at.
  */
 export async function verifyApiKey(
   rawKey: string,
   requiredScope: string = "image:transform",
   now: Date = new Date()
 ): Promise<VerifiedApiKeyIdentity> {
-  const genericAuthError = new Error("Invalid API key.");
+  const genericAuthError = new ApiKeyServiceError("UNAUTHORIZED", "Invalid API key.");
 
   // 1. Reject malformed keys before touching the database
   if (!isValidApiKeyFormat(rawKey)) {
@@ -469,20 +543,20 @@ export async function verifyApiKey(
     throw genericAuthError;
   }
 
-  // 6. Throttled last_used_at update (write at most once every 5 minutes)
+  // 6. Atomic, tenant-scoped throttled last_used_at update (at most once every 5 minutes)
   const FIVE_MINUTES_MS = 5 * 60 * 1000;
-  const shouldUpdateLastUsed =
-    !keyRow.lastUsedAt || now.getTime() - keyRow.lastUsedAt.getTime() >= FIVE_MINUTES_MS;
+  const cutoff = new Date(now.getTime() - FIVE_MINUTES_MS);
 
-  if (shouldUpdateLastUsed) {
-    try {
-      await db
-        .update(apiKeys)
-        .set({ lastUsedAt: now })
-        .where(eq(apiKeys.id, keyRow.id));
-    } catch {
-      // Non-blocking for verification
-    }
+  try {
+    await db.execute(sql`
+      UPDATE api_keys
+      SET last_used_at = ${now}
+      WHERE id = ${keyRow.id}
+        AND organization_id = ${keyRow.organizationId}
+        AND (last_used_at IS NULL OR last_used_at <= ${cutoff})
+    `);
+  } catch {
+    // Best-effort: timestamp update error must not fail a valid authentication
   }
 
   return {

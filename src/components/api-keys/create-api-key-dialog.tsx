@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createApiKeyAction } from "@/actions/api-keys";
-import { CreateApiKeyResult } from "@/lib/services/api-keys";
+import type { CreateApiKeyResult } from "@/types/api-keys";
 
 interface CreateApiKeyDialogProps {
   isOpen: boolean;
@@ -21,8 +21,43 @@ export function CreateApiKeyDialog({
   const [name, setName] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, startTransition] = React.useTransition();
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const dialogRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      inputRef.current?.focus();
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const handleClose = () => {
+    setError(null);
+    setName("");
+    onClose();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape" && !isPending) {
+      handleClose();
+    }
+    // Trap focus
+    if (e.key === "Tab" && dialogRef.current) {
+      const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        last.focus();
+        e.preventDefault();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        first.focus();
+        e.preventDefault();
+      }
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -48,6 +83,7 @@ export function CreateApiKeyDialog({
         setError(res.error || "Failed to create API key.");
       } else {
         setName("");
+        setError(null);
         onSuccess(res.data);
       }
     });
@@ -58,20 +94,28 @@ export function CreateApiKeyDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="create-dialog-title"
+      aria-describedby="create-dialog-desc"
+      onKeyDown={handleKeyDown}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
     >
-      <div className="w-full max-w-md rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95">
+      <div
+        ref={dialogRef}
+        className="w-full max-w-md rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95"
+      >
         <div className="space-y-1">
           <h2 id="create-dialog-title" className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
             Create Secret API Key
           </h2>
-          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+          <p id="create-dialog-desc" className="text-xs text-neutral-500 dark:text-neutral-400">
             Generate a new scoped secret key for programmatic image processing requests.
           </p>
         </div>
 
         {error && (
-          <div className="rounded-md bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 p-3 text-xs text-red-700 dark:text-red-300">
+          <div
+            role="alert"
+            className="rounded-md bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 p-3 text-xs text-red-700 dark:text-red-300"
+          >
             {error}
           </div>
         )}
@@ -82,6 +126,7 @@ export function CreateApiKeyDialog({
               Key Name / Description
             </Label>
             <Input
+              ref={inputRef}
               id="key-name"
               type="text"
               placeholder="e.g. Production Web Backend, Staging Server"
@@ -92,7 +137,6 @@ export function CreateApiKeyDialog({
               minLength={2}
               maxLength={64}
               className="text-sm"
-              autoFocus
             />
             <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
               Between 2 and 64 characters. Used to identify the key in your dashboard.
@@ -116,7 +160,7 @@ export function CreateApiKeyDialog({
               type="button"
               variant="outline"
               size="sm"
-              onClick={onClose}
+              onClick={handleClose}
               disabled={isPending}
             >
               Cancel

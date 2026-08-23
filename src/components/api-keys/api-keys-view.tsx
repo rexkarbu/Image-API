@@ -2,8 +2,8 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
-import { ApiKeyDto, CreateApiKeyResult, RotateApiKeyResult } from "@/lib/services/api-keys";
+import { Card, CardContent } from "@/components/ui/card";
+import type { ApiKeyDto, CreateApiKeyResult, RotateApiKeyResult } from "@/types/api-keys";
 import { ApiKeyStatusFilter } from "@/lib/validations/api-keys";
 import { CreateApiKeyDialog } from "./create-api-key-dialog";
 import { OneTimeRevealDialog } from "./one-time-reveal-dialog";

@@ -193,7 +193,7 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
         { organizationId: orgAId, userId: memberAId, role: "member" },
         { name: "Unauthorized Member Key", scopes: "image:transform" }
       )
-    ).rejects.toThrow("Unauthorized");
+    ).rejects.toThrow("Forbidden");
 
     // 2. Member cannot revoke
     const testKey = await createApiKey(
@@ -204,7 +204,7 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
 
     await expect(
       revokeApiKey({ organizationId: orgAId, userId: memberAId, role: "member" }, testKey.key.id)
-    ).rejects.toThrow("Unauthorized");
+    ).rejects.toThrow("Forbidden");
 
     // 3. Member cannot rotate
     await expect(
@@ -213,7 +213,7 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
         testKey.key.id,
         "grace_24h"
       )
-    ).rejects.toThrow("Unauthorized");
+    ).rejects.toThrow("Forbidden");
 
     // 4. Member CAN list metadata safely
     const memberKeys = await listApiKeys({ organizationId: orgAId }, "all");
@@ -372,5 +372,177 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
       expect(row).not.toHaveProperty("plaintext");
       expect(row).not.toHaveProperty("keyHash");
     }
+  });
+
+  // =========================================================================
+  // ADVERSARIAL CONCURRENCY TESTS (M1.1 CORRECTION)
+  // =========================================================================
+
+  it("handles parallel revoke calls without duplicate audit events (idempotent row-lock)", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const created = await createApiKey(context, { name: "Parallel Revoke Target", scopes: "image:transform" });
+    createdKeyIds.push(created.key.id);
+
+    // Launch 5 concurrent revoke requests against the same key
+    const results = await Promise.allSettled([
+      revokeApiKey(context, created.key.id),
+      revokeApiKey(context, created.key.id),
+      revokeApiKey(context, created.key.id),
+      revokeApiKey(context, created.key.id),
+      revokeApiKey(context, created.key.id),
+    ]);
+
+    // All 5 should resolve gracefully (performing revocation or returning already-revoked DTO)
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    expect(fulfilled.length).toBe(5);
+
+    // Confirm database state: status is 'revoked' and EXACTLY ONE 'revoked' audit event exists
+    const [dbKey] = await db.select().from(apiKeys).where(eq(apiKeys.id, created.key.id));
+    expect(dbKey.status).toBe("revoked");
+    expect(dbKey.revokedAt).not.toBeNull();
+
+    const auditRows = await db
+      .select()
+      .from(apiKeyAuditEvents)
+      .where(
+        and(
+          eq(apiKeyAuditEvents.apiKeyId, created.key.id),
+          eq(apiKeyAuditEvents.eventType, "revoked")
+        )
+      );
+    expect(auditRows.length).toBe(1);
+  });
+
+  it("handles parallel immediate rotation: exactly one succeeds, losing requests fail safely with conflict", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const created = await createApiKey(context, { name: "Parallel Immediate Rotation Target", scopes: "image:transform" });
+    createdKeyIds.push(created.key.id);
+
+    // Launch 5 concurrent immediate rotation requests against the same key
+    const results = await Promise.allSettled([
+      rotateApiKey(context, created.key.id, "immediate"),
+      rotateApiKey(context, created.key.id, "immediate"),
+      rotateApiKey(context, created.key.id, "immediate"),
+      rotateApiKey(context, created.key.id, "immediate"),
+      rotateApiKey(context, created.key.id, "immediate"),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<any>[];
+    const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+
+    // Exactly 1 request must succeed
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(4);
+
+    const winningResult = fulfilled[0].value;
+    createdKeyIds.push(winningResult.newKey.id);
+
+    expect(winningResult.plaintextKey.startsWith("img_live_")).toBe(true);
+    expect(winningResult.newKey.status).toBe("active");
+    expect(winningResult.oldKey.status).toBe("revoked");
+
+    // All losing requests must fail with a safe domain error without exposing plaintext
+    for (const rej of rejected) {
+      expect(rej.reason).toBeInstanceOf(Error);
+      expect(rej.reason.plaintextKey).toBeUndefined();
+    }
+
+    // Check DB: exactly 1 replacement key created with related_api_key_id pointing to created.key.id
+    const rotationAuditEvents = await db
+      .select()
+      .from(apiKeyAuditEvents)
+      .where(
+        and(
+          eq(apiKeyAuditEvents.relatedApiKeyId, created.key.id),
+          eq(apiKeyAuditEvents.eventType, "rotation_created")
+        )
+      );
+    expect(rotationAuditEvents.length).toBe(1);
+
+    // Winning key verifies; old key fails
+    const verifiedNew = await verifyApiKey(winningResult.plaintextKey);
+    expect(verifiedNew.apiKeyId).toBe(winningResult.newKey.id);
+
+    await expect(verifyApiKey(created.plaintextKey)).rejects.toThrow("Invalid API key.");
+  });
+
+  it("handles parallel 24-hour grace rotation: exactly one succeeds without orphan keys or duplicate schedules", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const created = await createApiKey(context, { name: "Parallel Grace Rotation Target", scopes: "image:transform" });
+    createdKeyIds.push(created.key.id);
+
+    // Launch 5 concurrent 24-hour grace rotation requests
+    const results = await Promise.allSettled([
+      rotateApiKey(context, created.key.id, "grace_24h"),
+      rotateApiKey(context, created.key.id, "grace_24h"),
+      rotateApiKey(context, created.key.id, "grace_24h"),
+      rotateApiKey(context, created.key.id, "grace_24h"),
+      rotateApiKey(context, created.key.id, "grace_24h"),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<any>[];
+    const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(4);
+
+    const winningResult = fulfilled[0].value;
+    createdKeyIds.push(winningResult.newKey.id);
+
+    // Check DB: exactly 1 rotation_created event and 1 expiration_scheduled event
+    const rotationAuditEvents = await db
+      .select()
+      .from(apiKeyAuditEvents)
+      .where(
+        and(
+          eq(apiKeyAuditEvents.relatedApiKeyId, created.key.id),
+          eq(apiKeyAuditEvents.eventType, "rotation_created")
+        )
+      );
+    expect(rotationAuditEvents.length).toBe(1);
+
+    const expirationAuditEvents = await db
+      .select()
+      .from(apiKeyAuditEvents)
+      .where(
+        and(
+          eq(apiKeyAuditEvents.apiKeyId, created.key.id),
+          eq(apiKeyAuditEvents.eventType, "expiration_scheduled")
+        )
+      );
+    expect(expirationAuditEvents.length).toBe(1);
+
+    // Both keys verify during grace period
+    const verifiedOld = await verifyApiKey(created.plaintextKey);
+    expect(verifiedOld.apiKeyId).toBe(created.key.id);
+
+    const verifiedNew = await verifyApiKey(winningResult.plaintextKey);
+    expect(verifiedNew.apiKeyId).toBe(winningResult.newKey.id);
+  });
+
+  it("handles parallel verification calls with atomic, tenant-scoped throttled last_used_at updates", async () => {
+    const context = { organizationId: orgAId, userId: userAId, role: "owner" };
+    const created = await createApiKey(context, { name: "Parallel Verify Target", scopes: "image:transform" });
+    createdKeyIds.push(created.key.id);
+
+    // Launch 5 concurrent verification calls with the same key
+    const results = await Promise.all([
+      verifyApiKey(created.plaintextKey),
+      verifyApiKey(created.plaintextKey),
+      verifyApiKey(created.plaintextKey),
+      verifyApiKey(created.plaintextKey),
+      verifyApiKey(created.plaintextKey),
+    ]);
+
+    expect(results.length).toBe(5);
+    for (const res of results) {
+      expect(res.apiKeyId).toBe(created.key.id);
+      expect(res.organizationId).toBe(orgAId);
+      expect(res.scopes).toContain("image:transform");
+    }
+
+    // Verify last_used_at in DB is populated
+    const [dbKey] = await db.select().from(apiKeys).where(eq(apiKeys.id, created.key.id));
+    expect(dbKey.lastUsedAt).not.toBeNull();
   });
 });

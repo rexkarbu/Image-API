@@ -39,8 +39,3 @@ pnpm-debug.log*
 
 # Drizzle Studio / SQLite temp files
 .drizzle/
-
-# Auto-generated agent docs
-AGENTS.md
-CLAUDE.md
-
