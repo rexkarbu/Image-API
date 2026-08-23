@@ -7,21 +7,16 @@ import crypto from "node:crypto";
 describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
   const testRunId = crypto.randomUUID().slice(0, 8);
   const testSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-  const createdKeys: string[] = [];
+  const trackedCleanups: { limiter: Ratelimit; identifier: string }[] = [];
 
   beforeAll(() => {
     assertRedisDevelopmentSafety();
   });
 
   afterAll(async () => {
-    const redis = getRedisClient();
-    // Strict fail-closed cleanup: delete ONLY exact recorded test keys
-    for (const key of createdKeys) {
-      try {
-        await redis.del(key);
-      } catch {
-        // Ignore cleanup errors
-      }
+    // Official fail-closed cleanup using limiter.resetUsedTokens() without guessing key layouts
+    for (const item of trackedCleanups) {
+      await item.limiter.resetUsedTokens(item.identifier);
     }
   });
 
@@ -37,8 +32,7 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
 
     const testIp = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
     const identifier = deriveIpIdentifier(testIp, testSecret);
-    const redisKey = `${prefix}:${identifier}`;
-    createdKeys.push(redisKey);
+    trackedCleanups.push({ limiter, identifier });
 
     const res = await limiter.limit(identifier);
     expect(res.success).toBe(true);
@@ -59,8 +53,7 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
 
     const testKeyId = crypto.randomUUID();
     const identifier = deriveApiKeyIdentifier("org-test", testKeyId, testSecret);
-    const redisKey = `${prefix}:${identifier}`;
-    createdKeys.push(redisKey);
+    trackedCleanups.push({ limiter, identifier });
 
     // Consume 2 tokens
     const r1 = await limiter.limit(identifier);
@@ -94,8 +87,7 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
 
     const testKeyId = crypto.randomUUID();
     const identifier = deriveApiKeyIdentifier("org-test-shared", testKeyId, testSecret);
-    const redisKey = `${prefix}:${identifier}`;
-    createdKeys.push(redisKey);
+    trackedCleanups.push({ limiter: limiterInstance1, identifier });
 
     const res1 = await limiterInstance1.limit(identifier);
     expect(res1.success).toBe(true);
@@ -120,8 +112,7 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
 
     const testKeyId = crypto.randomUUID();
     const identifier = deriveApiKeyIdentifier("org-concurrent", testKeyId, testSecret);
-    const redisKey = `${prefix}:${identifier}`;
-    createdKeys.push(redisKey);
+    trackedCleanups.push({ limiter, identifier });
 
     // Launch 10 concurrent requests for a capacity of 5
     const promises = Array.from({ length: 10 }).map(() => limiter.limit(identifier));
@@ -144,12 +135,12 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
       analytics: false,
     });
 
-    const sharedString = "collision-test-string";
-    const ipId = deriveIpIdentifier(sharedString, testSecret);
-    const keyId = deriveApiKeyIdentifier(sharedString, "dummy", testSecret);
+    const sharedIp = "192.0.2.100";
+    const ipId = deriveIpIdentifier(sharedIp, testSecret);
+    const keyId = deriveApiKeyIdentifier(sharedIp, "dummy-key-id", testSecret);
 
-    createdKeys.push(`${prefix}:${ipId}`);
-    createdKeys.push(`${prefix}:${keyId}`);
+    trackedCleanups.push({ limiter, identifier: ipId });
+    trackedCleanups.push({ limiter, identifier: keyId });
 
     // Exhaust IP identifier
     const ipRes = await limiter.limit(ipId);
@@ -161,5 +152,64 @@ describe("Live Upstash Redis Rate Limiting Integration Tests", () => {
     // Key identifier must still be fresh (1 token available)
     const keyRes = await limiter.limit(keyId);
     expect(keyRes.success).toBe(true);
+  });
+
+  it("proves exact cleanup restores full initial allowance for sliding-window and token-bucket algorithms", async () => {
+    const redis = getRedisClient();
+
+    // 1. Sliding Window Cleanup Verification
+    const swPrefix = `test-cleanup-sw:${testRunId}`;
+    const swLimiter = new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(2, "30 s"),
+      prefix: swPrefix,
+      analytics: false,
+    });
+
+    const swIp = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
+    const swId = deriveIpIdentifier(swIp, testSecret);
+
+    // Consume 1 token
+    const sw1 = await swLimiter.limit(swId);
+    expect(sw1.success).toBe(true);
+    expect(sw1.remaining).toBe(1);
+
+    // Reset via official API
+    await swLimiter.resetUsedTokens(swId);
+
+    // Verify full initial allowance is restored (remaining is back to 1)
+    const swRestored = await swLimiter.limit(swId);
+    expect(swRestored.success).toBe(true);
+    expect(swRestored.remaining).toBe(1);
+
+    // Final reset
+    await swLimiter.resetUsedTokens(swId);
+
+    // 2. Token Bucket Cleanup Verification
+    const tbPrefix = `test-cleanup-tb:${testRunId}`;
+    const tbLimiter = new Ratelimit({
+      redis,
+      limiter: Ratelimit.tokenBucket(2, "30 s", 2),
+      prefix: tbPrefix,
+      analytics: false,
+    });
+
+    const tbId = deriveApiKeyIdentifier("org-cleanup-test", crypto.randomUUID(), testSecret);
+
+    // Consume 1 token
+    const tb1 = await tbLimiter.limit(tbId);
+    expect(tb1.success).toBe(true);
+    expect(tb1.remaining).toBe(1);
+
+    // Reset via official API
+    await tbLimiter.resetUsedTokens(tbId);
+
+    // Verify full initial allowance is restored (remaining is back to 1)
+    const tbRestored = await tbLimiter.limit(tbId);
+    expect(tbRestored.success).toBe(true);
+    expect(tbRestored.remaining).toBe(1);
+
+    // Final reset
+    await tbLimiter.resetUsedTokens(tbId);
   });
 });

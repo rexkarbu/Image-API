@@ -1,3 +1,4 @@
+import "server-only";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { getRedisClient } from "./redis-safety";
@@ -20,16 +21,126 @@ export interface RateLimitOptions {
   timeoutMs?: number;
 }
 
-function getTimeout(explicitTimeout?: number): number {
+export interface ValidatedRateLimitResult {
+  success: boolean;
+  limit: number;
+  remaining: number;
+  reset: number;
+  retryAfterSeconds: number;
+}
+
+const MIN_TIMEOUT_MS = 500;
+const MAX_TIMEOUT_MS = 5000;
+const DEFAULT_PROD_TIMEOUT_MS = 2500;
+
+/**
+ * Validates and clamps rate limiter timeout within safe bounds [500ms, 5000ms].
+ */
+export function getValidatedTimeout(
+  explicitTimeout?: number,
+  isTestEnv?: boolean
+): number {
   if (explicitTimeout !== undefined) {
-    return explicitTimeout;
+    if (
+      typeof explicitTimeout === "number" &&
+      Number.isFinite(explicitTimeout) &&
+      Number.isInteger(explicitTimeout) &&
+      explicitTimeout >= MIN_TIMEOUT_MS &&
+      explicitTimeout <= MAX_TIMEOUT_MS
+    ) {
+      return explicitTimeout;
+    }
   }
+
   if (process.env.UPSTASH_REDIS_TIMEOUT_MS) {
     const parsed = Number(process.env.UPSTASH_REDIS_TIMEOUT_MS);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
+    if (
+      Number.isFinite(parsed) &&
+      Number.isInteger(parsed) &&
+      parsed >= MIN_TIMEOUT_MS &&
+      parsed <= MAX_TIMEOUT_MS
+    ) {
+      return parsed;
+    }
   }
-  // Allow 4000ms in development/test environments to accommodate Next.js cold compilation; 2500ms in production.
-  return process.env.NODE_ENV === "production" ? 2500 : 4000;
+
+  const inTest = isTestEnv !== undefined ? isTestEnv : (process.env.NODE_ENV === "test" || Boolean(process.env.VITEST));
+  return inTest ? 4000 : DEFAULT_PROD_TIMEOUT_MS;
+}
+
+/**
+ * Pure validator that strictly verifies the result structure from Upstash ratelimit.
+ * Returns a validated result or null if the response is malformed, timed out, or unparseable.
+ */
+export function validateRateLimitResponse(
+  raw: unknown,
+  currentTimeMs: number = Date.now()
+): ValidatedRateLimitResult | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const res = raw as Record<string, unknown>;
+
+  // Upstash timeout reason fails closed
+  if (res.reason === "timeout") {
+    return null;
+  }
+
+  // Allowed SDK reasons: undefined, null, "", "cacheBlock", "cache"
+  if (
+    res.reason !== undefined &&
+    res.reason !== null &&
+    res.reason !== "" &&
+    res.reason !== "cacheBlock" &&
+    res.reason !== "cache"
+  ) {
+    return null;
+  }
+
+  if (typeof res.success !== "boolean") {
+    return null;
+  }
+
+  if (
+    typeof res.limit !== "number" ||
+    !Number.isFinite(res.limit) ||
+    !Number.isInteger(res.limit) ||
+    res.limit <= 0
+  ) {
+    return null;
+  }
+
+  if (
+    typeof res.remaining !== "number" ||
+    !Number.isFinite(res.remaining) ||
+    !Number.isInteger(res.remaining) ||
+    res.remaining < 0 ||
+    res.remaining > res.limit
+  ) {
+    return null;
+  }
+
+  if (
+    typeof res.reset !== "number" ||
+    !Number.isFinite(res.reset) ||
+    res.reset <= 0
+  ) {
+    return null;
+  }
+
+  const retryAfterSeconds = Math.max(1, Math.ceil((res.reset - currentTimeMs) / 1000));
+  if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds < 1) {
+    return null;
+  }
+
+  return {
+    success: res.success,
+    limit: res.limit,
+    remaining: res.remaining,
+    reset: res.reset,
+    retryAfterSeconds,
+  };
 }
 
 // In-memory hot cache for blocked requests (non-authoritative)
@@ -40,7 +151,7 @@ let globalIpLimiter: Ratelimit | null = null;
 let globalKeyLimiter: Ratelimit | null = null;
 
 export function getIpRateLimiter(customRedis?: Redis, timeoutMs?: number): Ratelimit {
-  const timeout = getTimeout(timeoutMs);
+  const timeout = getValidatedTimeout(timeoutMs);
 
   if (customRedis) {
     return new Ratelimit({
@@ -68,7 +179,7 @@ export function getIpRateLimiter(customRedis?: Redis, timeoutMs?: number): Ratel
 }
 
 export function getKeyRateLimiter(customRedis?: Redis, timeoutMs?: number): Ratelimit {
-  const timeout = getTimeout(timeoutMs);
+  const timeout = getValidatedTimeout(timeoutMs);
 
   if (customRedis) {
     return new Ratelimit({
@@ -121,10 +232,9 @@ export async function checkIpRateLimit(
 
   try {
     const limiter = options?.ipLimiter || getIpRateLimiter(options?.redis, options?.timeoutMs);
-    const res = await limiter.limit(identifier);
+    const rawRes = await limiter.limit(identifier);
 
-    // Fail closed on Upstash timeout
-    if (res.reason === "timeout") {
+    if (rawRes?.reason === "timeout") {
       console.error(`[RateLimit Timeout] limiter=${category} correlationId=${correlationId}`);
       throw new ApiError(
         503,
@@ -134,15 +244,23 @@ export async function checkIpRateLimit(
       );
     }
 
-    const now = Date.now();
-    const retryAfterSeconds = Math.max(1, Math.ceil((res.reset - now) / 1000));
+    const validated = validateRateLimitResponse(rawRes);
+    if (!validated) {
+      console.error(`[RateLimit Validation Error] limiter=${category} correlationId=${correlationId}`);
+      throw new ApiError(
+        503,
+        "RATE_LIMIT_UNAVAILABLE",
+        "Rate limiting service temporarily unavailable. Please try again later.",
+        correlationId
+      );
+    }
 
-    if (!res.success) {
+    if (!validated.success) {
       const headers: Record<string, string> = {
-        "Retry-After": String(retryAfterSeconds),
-        "X-RateLimit-Limit": String(res.limit),
-        "X-RateLimit-Remaining": String(res.remaining),
-        "X-RateLimit-Reset": String(Math.ceil(res.reset / 1000)),
+        "Retry-After": String(validated.retryAfterSeconds),
+        "X-RateLimit-Limit": String(validated.limit),
+        "X-RateLimit-Remaining": String(validated.remaining),
+        "X-RateLimit-Reset": String(Math.ceil(validated.reset / 1000)),
       };
 
       throw new ApiError(
@@ -156,10 +274,10 @@ export async function checkIpRateLimit(
 
     return {
       success: true,
-      limit: res.limit,
-      remaining: res.remaining,
-      reset: res.reset,
-      retryAfterSeconds,
+      limit: validated.limit,
+      remaining: validated.remaining,
+      reset: validated.reset,
+      retryAfterSeconds: validated.retryAfterSeconds,
     };
   } catch (err) {
     if (err instanceof ApiError) {
@@ -202,10 +320,9 @@ export async function checkApiKeyRateLimit(
 
   try {
     const limiter = options?.keyLimiter || getKeyRateLimiter(options?.redis, options?.timeoutMs);
-    const res = await limiter.limit(identifier);
+    const rawRes = await limiter.limit(identifier);
 
-    // Fail closed on Upstash timeout
-    if (res.reason === "timeout") {
+    if (rawRes?.reason === "timeout") {
       console.error(`[RateLimit Timeout] limiter=${category} correlationId=${correlationId}`);
       throw new ApiError(
         503,
@@ -215,15 +332,23 @@ export async function checkApiKeyRateLimit(
       );
     }
 
-    const now = Date.now();
-    const retryAfterSeconds = Math.max(1, Math.ceil((res.reset - now) / 1000));
+    const validated = validateRateLimitResponse(rawRes);
+    if (!validated) {
+      console.error(`[RateLimit Validation Error] limiter=${category} correlationId=${correlationId}`);
+      throw new ApiError(
+        503,
+        "RATE_LIMIT_UNAVAILABLE",
+        "Rate limiting service temporarily unavailable. Please try again later.",
+        correlationId
+      );
+    }
 
-    if (!res.success) {
+    if (!validated.success) {
       const headers: Record<string, string> = {
-        "Retry-After": String(retryAfterSeconds),
-        "X-RateLimit-Limit": String(res.limit),
-        "X-RateLimit-Remaining": String(res.remaining),
-        "X-RateLimit-Reset": String(Math.ceil(res.reset / 1000)),
+        "Retry-After": String(validated.retryAfterSeconds),
+        "X-RateLimit-Limit": String(validated.limit),
+        "X-RateLimit-Remaining": String(validated.remaining),
+        "X-RateLimit-Reset": String(Math.ceil(validated.reset / 1000)),
       };
 
       throw new ApiError(
@@ -237,10 +362,10 @@ export async function checkApiKeyRateLimit(
 
     return {
       success: true,
-      limit: res.limit,
-      remaining: res.remaining,
-      reset: res.reset,
-      retryAfterSeconds,
+      limit: validated.limit,
+      remaining: validated.remaining,
+      reset: validated.reset,
+      retryAfterSeconds: validated.retryAfterSeconds,
     };
   } catch (err) {
     if (err instanceof ApiError) {

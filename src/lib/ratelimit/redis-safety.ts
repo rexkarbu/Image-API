@@ -1,3 +1,4 @@
+import "server-only";
 import { Redis } from "@upstash/redis";
 
 export interface RedisSafetyEnv {
@@ -36,6 +37,49 @@ export function extractUpstashEndpointId(hostname: string): ExtractedRedisEndpoi
     endpointId: parts[0],
     isValidUpstashHost: true,
   };
+}
+
+/**
+ * Validates that an Upstash REST URL adheres to all security and syntax rules:
+ * - Must use https: protocol in all environments.
+ * - Must have a valid .upstash.io hostname.
+ * - Must not contain username, password, query parameters, URL fragments, or arbitrary paths.
+ * Never prints or leaks the URL in error messages.
+ */
+export function validateUpstashRestUrl(rawUrl: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL is not a valid URL.");
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL protocol must be https: in all environments.");
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL must not contain embedded user credentials.");
+  }
+
+  if (parsed.search && parsed.search !== "") {
+    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL must not contain query parameters.");
+  }
+
+  if (parsed.hash && parsed.hash !== "") {
+    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL must not contain URL fragments.");
+  }
+
+  if (parsed.pathname && parsed.pathname !== "/" && parsed.pathname !== "") {
+    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL must not contain a path component.");
+  }
+
+  const endpoint = extractUpstashEndpointId(parsed.hostname);
+  if (!endpoint.isValidUpstashHost) {
+    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL hostname must end with '.upstash.io'.");
+  }
+
+  return parsed;
 }
 
 /**
@@ -81,25 +125,8 @@ export function validateDevelopmentRedisSafety(
     throw new Error("Safety Check Failed: DEVELOPMENT_REDIS_ENDPOINT_ID is missing.");
   }
 
-  let parsed: URL;
-  try {
-    parsed = new URL(restUrl);
-  } catch {
-    throw new Error("Safety Check Failed: UPSTASH_REDIS_REST_URL is not a valid URL.");
-  }
-
-  if (parsed.protocol !== "https:") {
-    throw new Error(
-      `Safety Check Failed: UPSTASH_REDIS_REST_URL protocol must be https:, got '${parsed.protocol}'.`
-    );
-  }
-
+  const parsed = validateUpstashRestUrl(restUrl);
   const endpoint = extractUpstashEndpointId(parsed.hostname);
-  if (!endpoint.isValidUpstashHost) {
-    throw new Error(
-      "Safety Check Failed: UPSTASH_REDIS_REST_URL hostname does not end with '.upstash.io'."
-    );
-  }
 
   if (endpoint.endpointId !== expectedEndpointId) {
     throw new Error(
@@ -135,16 +162,7 @@ export function getRedisClient(): Redis {
     throw new Error("Redis configuration missing: UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are required.");
   }
 
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error("UPSTASH_REDIS_REST_URL is not a valid URL.");
-  }
-
-  if (parsed.protocol !== "https:" && (process.env.NODE_ENV === "production" || process.env.VERCEL_ENV === "production")) {
-    throw new Error("UPSTASH_REDIS_REST_URL protocol must be https: in production.");
-  }
+  validateUpstashRestUrl(url);
 
   cachedRedis = new Redis({
     url,

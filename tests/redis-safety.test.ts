@@ -2,10 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   extractUpstashEndpointId,
   validateDevelopmentRedisSafety,
+  validateUpstashRestUrl,
   RedisSafetyEnv,
 } from "@/lib/ratelimit/redis-safety";
 
-describe("Redis Safety Guard (Pure Unit Tests)", () => {
+describe("Redis Safety Guard & URL Validator (Pure Unit Tests)", () => {
   const validEndpointId = "us1-example-test-12345";
   const validRestUrl = `https://${validEndpointId}.upstash.io`;
   const validToken = "AXY1234567890ABCDEFTOKEN";
@@ -34,6 +35,37 @@ describe("Redis Safety Guard (Pure Unit Tests)", () => {
       const res = extractUpstashEndpointId("redis.mycompany.com");
       expect(res.isValidUpstashHost).toBe(false);
       expect(res.endpointId).toBe("");
+    });
+  });
+
+  describe("validateUpstashRestUrl", () => {
+    it("accepts canonical https://endpoint.upstash.io URL", () => {
+      const parsed = validateUpstashRestUrl("https://us1-valid-12345.upstash.io");
+      expect(parsed.origin).toBe("https://us1-valid-12345.upstash.io");
+    });
+
+    it("rejects http: protocol", () => {
+      expect(() => validateUpstashRestUrl("http://us1-valid-12345.upstash.io")).toThrow(/must be https:/);
+    });
+
+    it("rejects embedded credentials in URL", () => {
+      expect(() => validateUpstashRestUrl("https://user:pass@us1-valid-12345.upstash.io")).toThrow(/embedded user credentials/);
+    });
+
+    it("rejects query parameters in URL", () => {
+      expect(() => validateUpstashRestUrl("https://us1-valid-12345.upstash.io?token=xyz")).toThrow(/query parameters/);
+    });
+
+    it("rejects URL fragments", () => {
+      expect(() => validateUpstashRestUrl("https://us1-valid-12345.upstash.io#fragment")).toThrow(/fragments/);
+    });
+
+    it("rejects unexpected paths in URL", () => {
+      expect(() => validateUpstashRestUrl("https://us1-valid-12345.upstash.io/api/v1")).toThrow(/path component/);
+    });
+
+    it("rejects non-upstash domain", () => {
+      expect(() => validateUpstashRestUrl("https://redis.attacker.com")).toThrow(/must end with '\.upstash\.io'/);
     });
   });
 

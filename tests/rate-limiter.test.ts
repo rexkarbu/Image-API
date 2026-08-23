@@ -2,9 +2,11 @@ import { describe, it, expect, vi } from "vitest";
 import {
   checkIpRateLimit,
   checkApiKeyRateLimit,
+  validateRateLimitResponse,
+  getValidatedTimeout,
 } from "@/lib/ratelimit/limiter";
 import { buildRateLimitHeaders } from "@/lib/ratelimit/headers";
-import { ApiError } from "@/lib/api/errors";
+import { ApiError, createErrorResponse, sanitizeErrorHeaders } from "@/lib/api/errors";
 import type { Ratelimit } from "@upstash/ratelimit";
 
 describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)", () => {
@@ -12,16 +14,113 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
   const correlationId = "corr-test-12345";
   const now = 1724400000000; // Fixed timestamp ms
 
-  const createMockLimiter = (response: {
-    success: boolean;
-    limit: number;
-    remaining: number;
-    reset: number;
-    reason?: string;
-  }): Ratelimit =>
+  const createMockLimiter = (response: unknown): Ratelimit =>
     ({
       limit: vi.fn().mockResolvedValue(response),
     } as unknown as Ratelimit);
+
+  describe("Pure Validator (validateRateLimitResponse)", () => {
+    it("accepts valid Upstash response structure", () => {
+      const res = validateRateLimitResponse({
+        success: true,
+        limit: 120,
+        remaining: 115,
+        reset: now + 30000,
+      }, now);
+
+      expect(res).toEqual({
+        success: true,
+        limit: 120,
+        remaining: 115,
+        reset: now + 30000,
+        retryAfterSeconds: 30,
+      });
+    });
+
+    it("accepts valid cacheBlock reason", () => {
+      const res = validateRateLimitResponse({
+        success: false,
+        limit: 20,
+        remaining: 0,
+        reset: now + 10000,
+        reason: "cacheBlock",
+      }, now);
+
+      expect(res).not.toBeNull();
+      expect(res?.success).toBe(false);
+    });
+
+    it("rejects timeout reason", () => {
+      const res = validateRateLimitResponse({
+        success: true,
+        limit: 120,
+        remaining: 120,
+        reset: now + 60000,
+        reason: "timeout",
+      }, now);
+
+      expect(res).toBeNull();
+    });
+
+    it("rejects unexpected unknown reason", () => {
+      const res = validateRateLimitResponse({
+        success: false,
+        limit: 120,
+        remaining: 0,
+        reset: now + 60000,
+        reason: "malicious_unrecognized_reason",
+      }, now);
+
+      expect(res).toBeNull();
+    });
+
+    it("rejects non-boolean success", () => {
+      expect(validateRateLimitResponse({ success: "true", limit: 10, remaining: 5, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: 1, limit: 10, remaining: 5, reset: now + 1000 }, now)).toBeNull();
+    });
+
+    it("rejects invalid limit (NaN, Infinity, <=0, non-integer)", () => {
+      expect(validateRateLimitResponse({ success: true, limit: NaN, remaining: 0, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: Infinity, remaining: 0, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 0, remaining: 0, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: -5, remaining: 0, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10.5, remaining: 5, reset: now + 1000 }, now)).toBeNull();
+    });
+
+    it("rejects invalid remaining (negative, greater than limit, non-integer, NaN, Infinity)", () => {
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: -1, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 15, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5.5, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: NaN, reset: now + 1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: Infinity, reset: now + 1000 }, now)).toBeNull();
+    });
+
+    it("rejects invalid reset timestamps (<=0, NaN, Infinity)", () => {
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: 0 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: -1000 }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: NaN }, now)).toBeNull();
+      expect(validateRateLimitResponse({ success: true, limit: 10, remaining: 5, reset: Infinity }, now)).toBeNull();
+    });
+  });
+
+  describe("Timeout Bounds (getValidatedTimeout)", () => {
+    it("returns default timeout when undefined", () => {
+      expect(getValidatedTimeout()).toBe(4000); // Test runner default
+      expect(getValidatedTimeout(undefined, false)).toBe(2500); // Production default
+    });
+
+    it("accepts valid explicit timeout within [500, 5000]", () => {
+      expect(getValidatedTimeout(1500)).toBe(1500);
+      expect(getValidatedTimeout(3000)).toBe(3000);
+    });
+
+    it("falls back to default when explicit timeout is out of bounds", () => {
+      expect(getValidatedTimeout(100)).toBe(4000);
+      expect(getValidatedTimeout(100, false)).toBe(2500);
+      expect(getValidatedTimeout(100000)).toBe(4000);
+      expect(getValidatedTimeout(NaN)).toBe(4000);
+    });
+  });
 
   describe("IP Rate Limiting", () => {
     it("returns allowed decision with correct quota metadata", async () => {
@@ -95,6 +194,22 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
         expect(apiErr.statusCode).toBe(503);
         expect(apiErr.code).toBe("RATE_LIMIT_UNAVAILABLE");
       }
+    });
+
+    it("converts malformed Upstash response to fail-closed 503 RATE_LIMIT_UNAVAILABLE", async () => {
+      const mockLimiter = createMockLimiter({
+        success: true,
+        limit: "120", // String instead of number
+        remaining: -5,
+        reset: "invalid",
+      });
+
+      await expect(
+        checkIpRateLimit("203.0.113.195", correlationId, { secret, ipLimiter: mockLimiter })
+      ).rejects.toMatchObject({
+        statusCode: 503,
+        code: "RATE_LIMIT_UNAVAILABLE",
+      });
     });
 
     it("converts Redis network / runtime exception to fail-closed 503 RATE_LIMIT_UNAVAILABLE", async () => {
@@ -182,6 +297,60 @@ describe("Distributed Rate Limiting Unit Tests (Fail-Closed & Header Contracts)"
         statusCode: 503,
         code: "RATE_LIMIT_UNAVAILABLE",
       });
+    });
+  });
+
+  describe("Error Response Header Allowlist & Security Header Protection", () => {
+    it("sanitizes rate-limit headers to non-negative integer values", () => {
+      const safe = sanitizeErrorHeaders({
+        "Retry-After": "30",
+        "X-RateLimit-Limit": "120",
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": "1724400030",
+        "X-Injected-Header": "malicious",
+        "Content-Type": "text/html",
+      });
+
+      expect(safe).toEqual({
+        "Retry-After": "30",
+        "X-RateLimit-Limit": "120",
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": "1724400030",
+      });
+    });
+
+    it("rejects non-integer / NaN / negative header values", () => {
+      const safe = sanitizeErrorHeaders({
+        "Retry-After": "NaN",
+        "X-RateLimit-Limit": "-5",
+        "X-RateLimit-Remaining": "3.14",
+        "X-RateLimit-Reset": "Infinity",
+      });
+
+      expect(safe).toEqual({});
+    });
+
+    it("prevents ApiError from overriding Content-Type, Cache-Control, X-Content-Type-Options, or X-Request-ID", () => {
+      const maliciousError = new ApiError(
+        429,
+        "RATE_LIMITED",
+        "Rate limit exceeded",
+        "legitimate-req-id",
+        {
+          "Content-Type": "text/html",
+          "Cache-Control": "public, max-age=3600",
+          "X-Content-Type-Options": "allow-sniffing",
+          "X-Request-ID": "spoofed-request-id",
+          "Retry-After": "10",
+        }
+      );
+
+      const response = createErrorResponse(maliciousError, "legitimate-req-id");
+      expect(response.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(response.headers.get("X-Request-ID")).toBe("legitimate-req-id");
+      expect(response.headers.get("Retry-After")).toBe("10");
     });
   });
 

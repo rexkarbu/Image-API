@@ -1,11 +1,49 @@
 import { describe, it, expect } from "vitest";
-import { resolveClientIp } from "@/lib/security/client-ip";
+import { resolveClientIp, normalizeIp } from "@/lib/security/client-ip";
 import { ApiError } from "@/lib/api/errors";
 
-describe("Trusted Client-IP Resolution", () => {
+describe("Trusted Client-IP Resolution & Normalization", () => {
   const correlationId = "test-req-correlation-id";
 
-  describe("Production Environment", () => {
+  describe("IPv4 & IPv6 Normalization (normalizeIp)", () => {
+    it("canonicalizes equivalent IPv6 representations to identical RFC 5952 format", () => {
+      const full = "2001:0db8:0000:0000:0000:ff00:0042:8329";
+      const compressed = "2001:db8::ff00:42:8329";
+      const uppercase = "2001:DB8:0:0:0:FF00:42:8329";
+
+      expect(normalizeIp(full)).toBe("2001:db8::ff00:42:8329");
+      expect(normalizeIp(compressed)).toBe("2001:db8::ff00:42:8329");
+      expect(normalizeIp(uppercase)).toBe("2001:db8::ff00:42:8329");
+    });
+
+    it("canonicalizes localhost ::1 and 0:0:0:0:0:0:0:1 identically", () => {
+      expect(normalizeIp("::1")).toBe("::1");
+      expect(normalizeIp("0:0:0:0:0:0:0:1")).toBe("::1");
+      expect(normalizeIp("0000:0000:0000:0000:0000:0000:0000:0001")).toBe("::1");
+    });
+
+    it("canonicalizes unspecified :: address", () => {
+      expect(normalizeIp("::")).toBe("::");
+      expect(normalizeIp("0:0:0:0:0:0:0:0")).toBe("::");
+    });
+
+    it("canonicalizes IPv4 addresses without leading zeros", () => {
+      expect(normalizeIp("192.0.2.1")).toBe("192.0.2.1");
+      expect(normalizeIp(" 10.0.0.1 ")).toBe("10.0.0.1");
+    });
+
+    it("rejects malformed IPv4 and IPv6 strings", () => {
+      expect(normalizeIp("192.0.2.300")).toBeNull();
+      expect(normalizeIp("192.0.2")).toBeNull();
+      expect(normalizeIp("192.0.2.1.5")).toBeNull();
+      expect(normalizeIp("2001:db8:::1")).toBeNull(); // multiple double colons
+      expect(normalizeIp("2001:xyz::1")).toBeNull(); // non-hex
+      expect(normalizeIp("")).toBeNull();
+      expect(normalizeIp("not-an-ip")).toBeNull();
+    });
+  });
+
+  describe("Production on Vercel", () => {
     it("resolves valid IPv4 from x-vercel-forwarded-for header in production on Vercel", () => {
       const request = new Request("http://localhost/v1/images/transform", {
         headers: {
@@ -17,7 +55,7 @@ describe("Trusted Client-IP Resolution", () => {
       expect(ip).toBe("203.0.113.195");
     });
 
-    it("resolves valid IPv6 and normalizes to lowercase in production", () => {
+    it("resolves valid IPv6 and canonicalizes to RFC 5952 in production", () => {
       const request = new Request("http://localhost/v1/images/transform", {
         headers: {
           "x-vercel-forwarded-for": "2001:0DB8:85A3:0000:0000:8A2E:0370:7334",
@@ -25,7 +63,7 @@ describe("Trusted Client-IP Resolution", () => {
       });
 
       const ip = resolveClientIp(request, correlationId, { isProduction: true, isVercel: true });
-      expect(ip).toBe("2001:0db8:85a3:0000:0000:8a2e:0370:7334");
+      expect(ip).toBe("2001:db8:85a3::8a2e:370:7334");
     });
 
     it("parses first IP defensively from comma-separated proxy list", () => {
@@ -43,7 +81,6 @@ describe("Trusted Client-IP Resolution", () => {
       const request = new Request("http://localhost/v1/images/transform", {
         headers: {
           "x-forwarded-for": "1.2.3.4",
-          // x-vercel-forwarded-for is missing
         },
       });
 
@@ -90,6 +127,39 @@ describe("Trusted Client-IP Resolution", () => {
 
       expect(() =>
         resolveClientIp(request, correlationId, { isProduction: true, isVercel: true })
+      ).toThrow(ApiError);
+    });
+  });
+
+  describe("Production Outside Vercel (Fail-Closed Trust Boundary)", () => {
+    it("fails closed with 503 rather than trusting spoofed x-forwarded-for", () => {
+      const request = new Request("http://localhost/v1/images/transform", {
+        headers: {
+          "x-forwarded-for": "203.0.113.50",
+          "x-real-ip": "203.0.113.50",
+          "cf-connecting-ip": "203.0.113.50",
+        },
+      });
+
+      expect(() =>
+        resolveClientIp(request, correlationId, { isProduction: true, isVercel: false })
+      ).toThrow(ApiError);
+
+      try {
+        resolveClientIp(request, correlationId, { isProduction: true, isVercel: false });
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        const apiErr = err as ApiError;
+        expect(apiErr.statusCode).toBe(503);
+        expect(apiErr.code).toBe("RATE_LIMIT_UNAVAILABLE");
+      }
+    });
+
+    it("fails closed even if request has no headers in production outside Vercel", () => {
+      const request = new Request("http://localhost/v1/images/transform");
+
+      expect(() =>
+        resolveClientIp(request, correlationId, { isProduction: true, isVercel: false })
       ).toThrow(ApiError);
     });
   });

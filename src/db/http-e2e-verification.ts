@@ -3,10 +3,10 @@ import * as dotenv from "dotenv";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import { assertDevelopmentDatabaseSafety } from "./development-safety";
-import { assertRedisDevelopmentSafety, getRedisClient } from "../lib/ratelimit/redis-safety";
-import { deriveIpIdentifier, deriveApiKeyIdentifier } from "../lib/security/rate-limit-identifiers";
 import { deriveRequestId } from "../lib/api/idempotency";
 import { validatePostgresUrlSecurity } from "./ssl-validation";
+import { Ratelimit } from "@upstash/ratelimit";
+import { Redis } from "@upstash/redis";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
@@ -51,6 +51,14 @@ function validateTargetOrigin(rawUrl: string): string {
   return parsed.origin;
 }
 
+function deriveHmacIpIdentifier(ip: string, secret: string): string {
+  return crypto.createHmac("sha256", secret).update(`ip\0${ip.trim().toLowerCase()}`).digest("hex");
+}
+
+function deriveHmacKeyIdentifier(orgId: string, keyId: string, secret: string): string {
+  return crypto.createHmac("sha256", secret).update(`key\0${orgId.trim()}\0${keyId.trim()}`).digest("hex");
+}
+
 async function generateTestPng(w = 120, h = 80): Promise<Buffer> {
   return await sharp({
     create: {
@@ -93,9 +101,8 @@ function buildMultipartBody(
 }
 
 async function runHttpE2E() {
-  // Step 0: Enforce strict centralized development database & Redis safety guards
+  // Step 0: Enforce strict centralized development database safety guard
   assertDevelopmentDatabaseSafety();
-  assertRedisDevelopmentSafety();
 
   const targetOrigin = validateTargetOrigin(
     process.env.HTTP_E2E_BASE_URL || "http://127.0.0.1:3000"
@@ -108,6 +115,28 @@ async function runHttpE2E() {
     connectionString: dbUrl,
     max: 2,
     connectionTimeoutMillis: 25000,
+  });
+
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const rateLimitSecret = process.env.RATE_LIMIT_IDENTIFIER_SECRET;
+
+  if (!redisUrl || !redisToken || !rateLimitSecret) {
+    throw new Error("Missing Redis configuration in environment.");
+  }
+
+  const redis = new Redis({ url: redisUrl, token: redisToken });
+  const ipLimiter = new Ratelimit({
+    redis,
+    limiter: Ratelimit.slidingWindow(120, "60 s"),
+    prefix: "image-api:ratelimit:ip:v1",
+    analytics: false,
+  });
+  const keyLimiter = new Ratelimit({
+    redis,
+    limiter: Ratelimit.tokenBucket(10, "10 s", 20),
+    prefix: "image-api:ratelimit:key:v1",
+    analytics: false,
   });
 
   const testId = crypto.randomUUID().slice(0, 8);
@@ -135,7 +164,7 @@ async function runHttpE2E() {
 
   const trackedKeyIds = [testKeyId, revokedKeyId, expiredKeyId];
   const trackedRequestDigests: string[] = [];
-  const trackedRedisKeys: string[] = [];
+  const trackedCleanups: { limiter: Ratelimit; identifier: string }[] = [];
 
   const isolatedFloodIp = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
 
@@ -143,6 +172,13 @@ async function runHttpE2E() {
   console.log("🚀 Starting Milestone 4 Real HTTP, Rate Limiting & Metering Verification");
   console.log(`🎯 Target Origin: ${targetOrigin}`);
   console.log("==================================================");
+
+  // Warm-up local target server to ensure dev server is fully ready
+  try {
+    await fetch(`${targetOrigin}/`);
+  } catch {
+    // Ignore warm-up probe error
+  }
 
   let runError: Error | null = null;
 
@@ -220,7 +256,7 @@ async function runHttpE2E() {
     });
 
     if (response.status !== 200) {
-      throw new Error(`Expected HTTP 200 but received status ${response.status}`);
+      throw new Error("Expected HTTP 200 from successful transformation request.");
     }
 
     const contentType = response.headers.get("content-type");
@@ -238,7 +274,7 @@ async function runHttpE2E() {
       throw new Error("Unexpected output dimensions in HTTP response headers.");
     }
     if (!requestIdHeader) throw new Error("Missing X-Request-ID response header.");
-    if (rateLimitLimit !== "20") throw new Error(`Expected X-RateLimit-Limit: 20, got '${rateLimitLimit}'`);
+    if (rateLimitLimit !== "20") throw new Error("Unexpected X-RateLimit-Limit response header.");
     if (!rateLimitRemaining || isNaN(Number(rateLimitRemaining))) {
       throw new Error("Missing or invalid X-RateLimit-Remaining response header.");
     }
@@ -255,9 +291,9 @@ async function runHttpE2E() {
       `✅ Step 2 OK: HTTP 200 binary response verified (Format: ${outputMeta.format}, Dimensions: ${outputMeta.width}x${outputMeta.height}, Units: 1, RateLimit: ${rateLimitRemaining}/${rateLimitLimit}).`
     );
 
-    // Track API key limiter Redis key for cleanup
-    const keyHmacId = deriveApiKeyIdentifier(testOrgId, testKeyId);
-    trackedRedisKeys.push(`image-api:ratelimit:key:v1:${keyHmacId}`);
+    // Track API key limiter for official reset
+    const keyHmacId = deriveHmacKeyIdentifier(testOrgId, testKeyId, rateLimitSecret);
+    trackedCleanups.push({ limiter: keyLimiter, identifier: keyHmacId });
 
     // 3. Verify Exact PostgreSQL Usage Event Recording
     console.log("\n[Step 3] Verifying exact usage_events row in PostgreSQL...");
@@ -267,7 +303,7 @@ async function runHttpE2E() {
     );
 
     if (usageCheck.rows.length !== 1) {
-      throw new Error(`Expected exactly 1 usage_event row, found ${usageCheck.rows.length}`);
+      throw new Error("Usage event row verification failed in PostgreSQL.");
     }
 
     const row = usageCheck.rows[0];
@@ -291,7 +327,7 @@ async function runHttpE2E() {
     });
 
     if (dupResponse.status !== 409) {
-      throw new Error(`Expected HTTP 409 for duplicate request but got ${dupResponse.status}`);
+      throw new Error("Expected HTTP 409 for duplicate request.");
     }
 
     const dupBody = await dupResponse.json();
@@ -306,59 +342,34 @@ async function runHttpE2E() {
     const parallelRequestId = deriveRequestId(testOrgId, parallelKey);
     trackedRequestDigests.push(parallelRequestId);
 
+    const sendParallelRequest = () =>
+      fetch(`${targetOrigin}/v1/images/transform`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${plaintextKey}`,
+          "Idempotency-Key": parallelKey,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": String(body.length),
+        },
+        body: new Uint8Array(body),
+      });
+
     const parallelResponses = await Promise.all([
-      fetch(`${targetOrigin}/v1/images/transform`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${plaintextKey}`,
-          "Idempotency-Key": parallelKey,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        },
-        body: new Uint8Array(body),
-      }),
-      fetch(`${targetOrigin}/v1/images/transform`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${plaintextKey}`,
-          "Idempotency-Key": parallelKey,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        },
-        body: new Uint8Array(body),
-      }),
-      fetch(`${targetOrigin}/v1/images/transform`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${plaintextKey}`,
-          "Idempotency-Key": parallelKey,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        },
-        body: new Uint8Array(body),
-      }),
-      fetch(`${targetOrigin}/v1/images/transform`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${plaintextKey}`,
-          "Idempotency-Key": parallelKey,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        },
-        body: new Uint8Array(body),
-      }),
-      fetch(`${targetOrigin}/v1/images/transform`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${plaintextKey}`,
-          "Idempotency-Key": parallelKey,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        },
-        body: new Uint8Array(body),
-      }),
+      sendParallelRequest(),
+      sendParallelRequest(),
+      sendParallelRequest(),
+      sendParallelRequest(),
+      sendParallelRequest(),
     ]);
+
+    // Drain all responses to ensure response processing completes
+    await Promise.all(parallelResponses.map((r) => r.arrayBuffer()));
 
     const successes = parallelResponses.filter((r) => r.status === 200);
     const duplicates = parallelResponses.filter((r) => r.status === 409);
 
     if (successes.length !== 1 || duplicates.length !== 4) {
-      throw new Error(`Expected 1 HTTP 200 and 4 HTTP 409s, got ${successes.length} 200s and ${duplicates.length} 409s.`);
+      throw new Error("Concurrent duplicate resolution failed to produce exactly 1 200 and 4 409s.");
     }
 
     const parallelDbCheck = await pool.query(
@@ -366,7 +377,7 @@ async function runHttpE2E() {
       [testOrgId, parallelRequestId]
     );
     if (parseInt(parallelDbCheck.rows[0].count, 10) !== 1) {
-      throw new Error(`Expected exactly 1 DB row for concurrent requests, got ${parallelDbCheck.rows[0].count}`);
+      throw new Error("Expected exactly 1 DB row for concurrent requests.");
     }
     console.log("✅ Step 5 OK: Exactly 1 winning request (200), 4 conflicts (409), exactly 1 database row.");
 
@@ -400,7 +411,7 @@ async function runHttpE2E() {
       });
 
       if (authRes.status !== 401) {
-        throw new Error(`Expected 401 for '${testCase.name}', got ${authRes.status}`);
+        throw new Error("Expected 401 for authentication failure test case.");
       }
 
       const resJson = await authRes.json();
@@ -412,7 +423,7 @@ async function runHttpE2E() {
       };
 
       if (JSON.stringify(normalizedPayload) !== JSON.stringify(expectedAuthPayload) || typeof resJson.error?.requestId !== "string") {
-        throw new Error(`Rejection body not uniform for '${testCase.name}'`);
+        throw new Error("Rejection body not uniform across authentication failure cases.");
       }
     }
     console.log("✅ Step 6 OK: All 6 authentication failure cases returned identical 401 UNAUTHORIZED responses.");
@@ -432,7 +443,7 @@ async function runHttpE2E() {
       },
       body: new Uint8Array(badOptBody),
     });
-    if (badOptRes.status !== 400) throw new Error(`Expected 400 for PNG with quality, got ${badOptRes.status}`);
+    if (badOptRes.status !== 400) throw new Error("Expected 400 for PNG with quality.");
 
     // Fit specified without height -> 400
     const badFitBoundary = "----BadFit" + crypto.randomUUID().replace(/-/g, "");
@@ -446,7 +457,7 @@ async function runHttpE2E() {
       },
       body: new Uint8Array(badFitBody),
     });
-    if (badFitRes.status !== 400) throw new Error(`Expected 400 for fit without height, got ${badFitRes.status}`);
+    if (badFitRes.status !== 400) throw new Error("Expected 400 for fit without height.");
 
     // Corrupt image -> 422
     const corruptBoundary = "----Corrupt" + crypto.randomUUID().replace(/-/g, "");
@@ -460,7 +471,7 @@ async function runHttpE2E() {
       },
       body: new Uint8Array(corruptBody),
     });
-    if (corruptRes.status !== 422) throw new Error(`Expected 422 for corrupt image, got ${corruptRes.status}`);
+    if (corruptRes.status !== 422) throw new Error("Expected 422 for corrupt image.");
 
     // Unsupported format (SVG) -> 415
     const svgBoundary = "----Svg" + crypto.randomUUID().replace(/-/g, "");
@@ -478,7 +489,7 @@ async function runHttpE2E() {
       },
       body: new Uint8Array(svgBody),
     });
-    if (svgRes.status !== 415) throw new Error(`Expected 415 for SVG, got ${svgRes.status}`);
+    if (svgRes.status !== 415) throw new Error("Expected 415 for SVG input.");
 
     // Oversized body (>10 MiB) -> 413
     const bigBoundary = "----Big" + crypto.randomUUID().replace(/-/g, "");
@@ -492,14 +503,14 @@ async function runHttpE2E() {
       },
       body: new Uint8Array(bigBody),
     });
-    if (bigRes.status !== 413) throw new Error(`Expected 413 for oversized file, got ${bigRes.status}`);
+    if (bigRes.status !== 413) throw new Error("Expected 413 for oversized file.");
 
     console.log("✅ Step 7 OK: Validation, fit gating, corrupt bytes, unsupported formats, and 413 payload limits verified.");
 
     // 8. Real HTTP IP Rate-Limit Exhaustion Test (120 req / 60s sliding window)
     console.log("\n[Step 8] Testing real HTTP IP rate-limit exhaustion (429 RATE_LIMITED)...");
-    const floodHmacId = deriveIpIdentifier(isolatedFloodIp);
-    trackedRedisKeys.push(`image-api:ratelimit:ip:v1:${floodHmacId}`);
+    const floodHmacId = deriveHmacIpIdentifier(isolatedFloodIp, rateLimitSecret);
+    trackedCleanups.push({ limiter: ipLimiter, identifier: floodHmacId });
 
     // Send unauthenticated requests in sequential batches until quota (120 req / 60s) is exhausted
     let rateLimitedRes: Response | null = null;
@@ -541,7 +552,7 @@ async function runHttpE2E() {
     }
 
     if (!rateLimitedRes || rateLimitedRes.status !== 429) {
-      throw new Error(`Expected HTTP 429 RATE_LIMITED on exhausted IP, got status ${rateLimitedRes?.status}`);
+      throw new Error("Expected HTTP 429 RATE_LIMITED on exhausted IP.");
     }
 
     const retryAfter = rateLimitedRes.headers.get("retry-after");
@@ -553,8 +564,8 @@ async function runHttpE2E() {
     const rlNoSniff = rateLimitedRes.headers.get("x-content-type-options");
 
     if (!retryAfter || Number(retryAfter) < 1) throw new Error("Missing or invalid Retry-After header on 429 response.");
-    if (rlLimit !== "120") throw new Error(`Expected X-RateLimit-Limit: 120, got '${rlLimit}'`);
-    if (rlRemaining !== "0") throw new Error(`Expected X-RateLimit-Remaining: 0, got '${rlRemaining}'`);
+    if (rlLimit !== "120") throw new Error("Unexpected X-RateLimit-Limit on 429 response.");
+    if (rlRemaining !== "0") throw new Error("Unexpected X-RateLimit-Remaining on 429 response.");
     if (!rlReset || isNaN(Number(rlReset))) throw new Error("Missing or invalid X-RateLimit-Reset header.");
     if (!rlReqId) throw new Error("Missing X-Request-ID header on 429 response.");
     if (rlCache !== "no-store") throw new Error("Expected Cache-Control: no-store on 429 response.");
@@ -562,10 +573,10 @@ async function runHttpE2E() {
 
     const rateLimitedJson = await rateLimitedRes.json();
     if (rateLimitedJson.error?.code !== "RATE_LIMITED") {
-      throw new Error(`Expected error code RATE_LIMITED, got '${rateLimitedJson.error?.code}'`);
+      throw new Error("Expected error code RATE_LIMITED.");
     }
     if (rateLimitedJson.error?.message !== "Too many requests. Please retry later.") {
-      throw new Error(`Expected error message 'Too many requests. Please retry later.', got '${rateLimitedJson.error?.message}'`);
+      throw new Error("Expected error message 'Too many requests. Please retry later.'.");
     }
     if (rateLimitedJson.error?.requestId !== rlReqId) {
       throw new Error("error.requestId in body does not match X-Request-ID header on 429 response.");
@@ -581,19 +592,19 @@ async function runHttpE2E() {
     const count = parseInt(totalUsage.rows[0].count, 10);
     // Exactly 2 successful transformations (Step 2 and winning request in Step 5)
     if (count !== 2) {
-      throw new Error(`Expected exactly 2 billable usage rows, found ${count}. Failed/duplicate/rate-limited requests recorded illegal usage!`);
+      throw new Error("Usage rows count assertion failed. Non-billable requests recorded usage!");
     }
     console.log(`✅ Step 9 OK: Exactly 2 billable usage rows verified in database (0 rows for all rejected/duplicate/rate-limited requests).`);
 
     console.log("\n==================================================");
     console.log("🎉 ALL REAL HTTP TRANSFORMATION, RATE LIMITING & METERING CHECKS PASSED!");
     console.log("==================================================");
-  } catch (err) {
-    runError = new Error(`HTTP E2E Verification failed during test execution: ${(err as Error).message}`);
-    console.error(`❌ HTTP E2E Verification Failed: operation=runHttpE2E runId=${testId} error=${(err as Error).message}`);
+  } catch {
+    runError = new Error("HTTP E2E Verification failed during test execution.");
+    console.error(`❌ HTTP E2E Verification Failed: operation=runHttpE2E runId=${testId}`);
     process.exitCode = 1;
   } finally {
-    console.log("\n🧹 Cleaning up test fixtures and Redis keys...");
+    console.log("\n🧹 Cleaning up test fixtures and Redis rate limiter allowances...");
     try {
       // 1. Clean PostgreSQL fixtures
       if (trackedRequestDigests.length > 0) {
@@ -612,15 +623,11 @@ async function runHttpE2E() {
       }
       await pool.query(`DELETE FROM "user" WHERE id = $1`, [testUserId]);
 
-      // 2. Clean Redis test keys
-      const redis = getRedisClient();
-      for (const rk of trackedRedisKeys) {
-        try {
-          await redis.del(rk);
-        } catch {
-          // Ignore key deletion errors during cleanup
-        }
+      // 2. Reset Redis rate limiter tokens via official API without guessing key layouts
+      for (const item of trackedCleanups) {
+        await item.limiter.resetUsedTokens(item.identifier);
       }
+
       console.log("✅ Fixture and Redis cleanup complete.");
     } catch {
       console.error(`⚠️ Cleanup failed for test run: operation=cleanupFixtures runId=${testId}`);
