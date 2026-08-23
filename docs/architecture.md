@@ -15,22 +15,22 @@
 |   (/dashboard, /onboarding)   |                           | (/v1/images/transform)|
 +-------------------------------+                           +-----------------------+
         |                                                           |
-        | [Cookie Session: Better Auth]                             | [Bearer Key: SHA-256]
-        v                                                           v
-+-------------------------------+                           +-----------------------+
-|     Next.js App Server        |                           |  Node.js Processing   |
-|   (Server Components/Auth)    |                           |  (Sharp / Transform)  |
-+-------------------------------+                           +-----------------------+
-        |                                                           |
-        | Tenant-Scoped DB Query                                    | Record Usage Event
-        v                                                           v
-+-----------------------------------------------------------------------------------+
-|                        PostgreSQL Database (Drizzle ORM)                          |
-|  - user / session / account                                                       |
-|  - organizations / organization_members                                           |
-|  - api_keys (hashed SHA-256)                                                      |
-|  - usage_events (append-only immutable stream, SHA-256 request_id)                |
-+-----------------------------------------------------------------------------------+
+        | [Cookie Session: Better Auth]                             | 1. IP Rate Limiter [Upstash]
+        v                                                           | 2. Bearer Key [SHA-256]
++-------------------------------+                           | 3. Key Rate Limiter [Upstash]
+|     Next.js App Server        |                           v
+|   (Server Components/Auth)    |                   +-------------------------------+
++-------------------------------+                   |     Node.js Processing        |
+        |                                           |     (Sharp / Transform)       |
+        | Tenant-Scoped DB Query                    +-------------------------------+
+        v                                                           |
++---------------------------------------------------+       | Record Usage Event
+|        PostgreSQL Database (Drizzle ORM)          |<------+
+|  - user / session / account                       |
+|  - organizations / organization_members           |
+|  - api_keys (hashed SHA-256)                      |
+|  - usage_events (append-only immutable stream)    |
++---------------------------------------------------+
 ```
 
 ---
@@ -111,13 +111,7 @@
   - Usage recording occurs strictly **after** successful image processing and verification that client is still connected (`!request.signal.aborted`).
   - Writes to `usage_events` with `units = 1`, `status_code = 200`, `endpoint = "/v1/images/transform"`.
   - Uses PostgreSQL `ON CONFLICT (request_id) DO NOTHING` to serialize concurrent requests: losing requests receive `409 DUPLICATE_REQUEST` without recording additional usage units.
-  - All failure paths (400, 401, 413, 415, 422, 500, 503) create **zero** usage event rows.
-
-### Verification Tiers
-- **Unit Tests**: Pure logic assertions for crypto, tokens, options parsing, 7-part/8-part boundary enforcement, abort listener removal, EXIF/XMP/GPS stripping, PDF gating, and route orchestration error boundaries (500/503/409/422).
-- **Live Database Integration Tests**: Live Neon PostgreSQL tests for tenant scoping, key rotation (immediate/grace), constraint validation, concurrent conflict handling, and usage recording.
-- **Real HTTP Server Verification**: Full end-to-end loopback HTTP runs against the Next.js server for binary headers, real duplicate rejections, uniform 401 payloads, and zero billable usage guarantees.
-- **GitHub CI**: Not configured; all validations are executed locally in the development environment.
+  - All failure paths (400, 401, 413, 415, 422, 429, 500, 503) create **zero** usage event rows.
 
 ---
 
@@ -167,25 +161,77 @@
 - Queries with a cursor apply `(created_at < cursor.createdAt) OR (created_at = cursor.createdAt AND id < cursor.id)`, eliminating duplicate or skipped rows across identical millisecond timestamps.
 - Cursors are strictly validated for length, Base64URL character set, exact 2-key JSON shape, canonical ISO timestamp, and valid ID format.
 
-### Truthful Quota Architecture & Zero-Percentage Rendering
-- Returns an unconfigured quota object (`configured: false`, `allowedMonthlyUnits: null`, `percentUsed: null`).
-- Renders "No quota configured" in UI without fabricating hypothetical quotas or synthetic progress bars.
-- When total units are zero, key breakdowns render `—` without progress bars.
+---
 
-### Near-Real-Time Auto-Refresh Lifecycle
-- The dashboard polls at ~30-second intervals via Next.js server actions / `router.refresh()` only when `document.visibilityState === "visible"`.
-- Event listeners and interval timers are strictly cleaned up on unmount and tab blur to prevent accumulating timers or resource drain.
+## 7. Distributed Rate Limiting & Abuse Protection Architecture (Milestone 4)
+
+### Overview & Multi-Tier Throttling
+To protect infrastructure from distributed denial-of-service, credential stuffing, compute exhaustion, and memory exhaustion, the transformation pipeline enforces two independent distributed rate limiters using Upstash REST-based Redis:
+
+```
+[Inbound HTTP Request]
+       │
+       ▼
+1. Resolve Trusted Client IP (from x-vercel-forwarded-for)
+       │
+       ▼
+2. Pre-Authentication IP Limiter (120 req / 60s, Sliding Window)
+       │  └─► If exhausted: Return 429 RATE_LIMITED (Zero DB access)
+       ▼
+3. Authenticate Bearer API Key (PostgreSQL SHA-256 key_hash lookup)
+       │  └─► If invalid: Return 401 UNAUTHORIZED (Indistinguishable)
+       ▼
+4. Authenticated API-Key Limiter (10 tokens / 10s, burst 20, Token Bucket)
+       │  └─► If exhausted: Return 429 RATE_LIMITED (Zero Sharp / Multipart)
+       ▼
+5. Validate Idempotency & Duplicate Check (PostgreSQL)
+       │
+       ▼
+6. Streaming Multipart Ingestion & Sandboxed Sharp Processing
+       │
+       ▼
+7. Atomic Usage Metering (PostgreSQL ON CONFLICT)
+       │
+       ▼
+8. Binary Output Response (with X-RateLimit-* headers)
+```
+
+### Rate Limiting Policies
+1. **Pre-Authentication IP Limiter (`image-api:ratelimit:ip:v1`)**:
+   - Algorithm: **Sliding Window** (120 requests per 60 seconds).
+   - Purpose: Mitigates brute-force credential stuffing and protects database connection pools.
+2. **Authenticated API-Key Limiter (`image-api:ratelimit:key:v1`)**:
+   - Algorithm: **Token Bucket** (Refill rate: 10 tokens / 10s, Maximum burst capacity: 20 tokens).
+   - Purpose: Prevents CPU and memory starvation by limiting compute-heavy Sharp transformations per organization credential.
+
+### Privacy-Preserving HMAC Identifiers
+- Identifiers stored in Redis are derived via **HMAC-SHA-256** using a server-only secret (`RATE_LIMIT_IDENTIFIER_SECRET`).
+- Domain separation prevents cross-namespace collisions:
+  - IP Identifier: `HMAC-SHA-256("ip\0" + normalizedClientIp)`
+  - API-Key Identifier: `HMAC-SHA-256("key\0" + organizationId + "\0" + apiKeyId)`
+- Redis receives only 64-character lowercase hexadecimal digests. Plaintext IP addresses, API keys, key hashes, and tenant IDs are **never** stored or logged.
+
+### Fail-Closed Resilience & Error Contract
+- If Upstash Redis times out (`reason === "timeout"`) or experiences network failure, the limiter strictly **fails closed**, returning `503 RATE_LIMIT_UNAVAILABLE`.
+- Request paths exceeding limits return `429 RATE_LIMITED`:
+  - `Retry-After`: Integer delta seconds (minimum 1).
+  - `X-RateLimit-Limit`: Maximum bucket capacity.
+  - `X-RateLimit-Remaining`: Remaining token allowance (`0`).
+  - `X-RateLimit-Reset`: Unix epoch reset timestamp in seconds.
+  - `X-Request-ID`: Correlation ID.
+- Rate-limited attempts create **zero** `usage_events` in PostgreSQL.
 
 ---
 
-## 7. Runtime & Infrastructure Requirements
+## 8. Runtime & Infrastructure Requirements
 
 - **Node.js Runtime**: Authentication routes, database connection pool, and image transformation routes explicitly declare `runtime = "nodejs"` to leverage native Node.js buffer, cryptographic primitives, and Sharp native binaries.
-- **Database Pooling**: Standard `pg.Pool` connection pooling compatible with any standard PostgreSQL instance or pooled cloud proxy.
+- **Database Pooling**: Standard `pg.Pool` connection pooling compatible with standard PostgreSQL instances or pooled cloud proxies.
+- **Distributed Cache / Rate Limiter**: `@upstash/redis` REST client compatible with serverless Edge and Node.js environments.
 
 ---
 
-## 8. Data Retention & Foreign-Key Delete Semantics
+## 9. Data Retention & Foreign-Key Delete Semantics
 
 To prevent accidental data loss and maintain an untampered audit history:
 - **Better Auth Tables (`session`, `account`)**: `ON DELETE CASCADE` when the parent `user` is deleted.
@@ -200,9 +246,9 @@ To prevent accidental data loss and maintain an untampered audit history:
 
 ---
 
-## 8. Release-Safety & Deployment Check
+## 10. Release-Safety & Deployment Check
 
 Before any production deployment:
 1. Verify the installed Next.js version against the latest security advisories.
 2. Run `pnpm audit --prod` to ensure zero unmitigated high/critical production vulnerabilities.
-3. Rerun the full test suite (`pnpm test`), typecheck (`pnpm typecheck`), and build (`pnpm build`).
+3. Rerun the full test suite (`pnpm test`), live Redis suite (`pnpm test:redis-integration`), typecheck (`pnpm typecheck`), and build (`pnpm build`).

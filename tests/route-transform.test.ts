@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("@/lib/security/client-ip", () => ({
+  resolveClientIp: vi.fn(),
+}));
+
+vi.mock("@/lib/ratelimit/limiter", () => ({
+  checkIpRateLimit: vi.fn(),
+  checkApiKeyRateLimit: vi.fn(),
+}));
+
 vi.mock("@/lib/api/auth", () => ({
   authenticateApiRequest: vi.fn(),
 }));
@@ -23,6 +32,8 @@ vi.mock("@/lib/services/usage-events", () => ({
 }));
 
 import { POST } from "@/app/v1/images/transform/route";
+import { resolveClientIp } from "@/lib/security/client-ip";
+import { checkIpRateLimit, checkApiKeyRateLimit } from "@/lib/ratelimit/limiter";
 import { authenticateApiRequest } from "@/lib/api/auth";
 import { validateIdempotencyKey, deriveRequestId } from "@/lib/api/idempotency";
 import { parseMultipartRequest } from "@/lib/api/multipart";
@@ -58,6 +69,21 @@ describe("POST /v1/images/transform Route Orchestration & Error Boundary Unit Te
   beforeEach(() => {
     vi.clearAllMocks();
 
+    vi.mocked(resolveClientIp).mockReturnValue("203.0.113.195");
+    vi.mocked(checkIpRateLimit).mockResolvedValue({
+      success: true,
+      limit: 120,
+      remaining: 119,
+      reset: 1724400060000,
+      retryAfterSeconds: 60,
+    });
+    vi.mocked(checkApiKeyRateLimit).mockResolvedValue({
+      success: true,
+      limit: 20,
+      remaining: 19,
+      reset: 1724400010000,
+      retryAfterSeconds: 10,
+    });
     vi.mocked(authenticateApiRequest).mockResolvedValue(mockIdentity);
     vi.mocked(validateIdempotencyKey).mockReturnValue("valid-idempotency-key-123456789");
     vi.mocked(deriveRequestId).mockReturnValue("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
@@ -122,12 +148,68 @@ describe("POST /v1/images/transform Route Orchestration & Error Boundary Unit Te
     expect(res.headers.get("x-usage-units")).toBe("1");
     expect(res.headers.get("x-image-width")).toBe("100");
     expect(res.headers.get("x-image-height")).toBe("100");
+    expect(res.headers.get("x-ratelimit-limit")).toBe("20");
+    expect(res.headers.get("x-ratelimit-remaining")).toBe("19");
+    expect(res.headers.get("x-ratelimit-reset")).toBe("1724400010");
 
+    expect(resolveClientIp).toHaveBeenCalledTimes(1);
+    expect(checkIpRateLimit).toHaveBeenCalledTimes(1);
     expect(authenticateApiRequest).toHaveBeenCalledTimes(1);
+    expect(checkApiKeyRateLimit).toHaveBeenCalledTimes(1);
     expect(isDuplicateRequest).toHaveBeenCalledTimes(1);
     expect(parseMultipartRequest).toHaveBeenCalledTimes(1);
     expect(transformImage).toHaveBeenCalledTimes(1);
     expect(recordUsageEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 429 RATE_LIMITED when IP rate limit is exceeded and prevents authentication and downstream work", async () => {
+    vi.mocked(checkIpRateLimit).mockRejectedValueOnce(
+      new ApiError(429, "RATE_LIMITED", "Too many requests. Please retry later.", "corr-ip-block", {
+        "Retry-After": "45",
+        "X-RateLimit-Limit": "120",
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": "1724400060",
+      })
+    );
+
+    const req = createRequest();
+    const res = await POST(req);
+
+    const json = await assertSecurityHeadersAndEnvelope(res, 429, true);
+    expect(json.error.code).toBe("RATE_LIMITED");
+    expect(res.headers.get("retry-after")).toBe("45");
+    expect(res.headers.get("x-ratelimit-limit")).toBe("120");
+    expect(res.headers.get("x-ratelimit-remaining")).toBe("0");
+
+    // Authentication, multipart parsing, transform, and metering MUST NOT be invoked
+    expect(authenticateApiRequest).not.toHaveBeenCalled();
+    expect(parseMultipartRequest).not.toHaveBeenCalled();
+    expect(transformImage).not.toHaveBeenCalled();
+    expect(recordUsageEvent).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 RATE_LIMITED when API key rate limit is exceeded and prevents multipart parsing, transformation, and metering", async () => {
+    vi.mocked(checkApiKeyRateLimit).mockRejectedValueOnce(
+      new ApiError(429, "RATE_LIMITED", "Too many requests. Please retry later.", "corr-key-block", {
+        "Retry-After": "8",
+        "X-RateLimit-Limit": "20",
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": "1724400010",
+      })
+    );
+
+    const req = createRequest();
+    const res = await POST(req);
+
+    const json = await assertSecurityHeadersAndEnvelope(res, 429, true);
+    expect(json.error.code).toBe("RATE_LIMITED");
+    expect(res.headers.get("retry-after")).toBe("8");
+
+    // Auth succeeded, but multipart, transform, and metering MUST NOT be invoked
+    expect(authenticateApiRequest).toHaveBeenCalledTimes(1);
+    expect(parseMultipartRequest).not.toHaveBeenCalled();
+    expect(transformImage).not.toHaveBeenCalled();
+    expect(recordUsageEvent).not.toHaveBeenCalled();
   });
 
   it("returns 503 with security headers when authentication service is unavailable and prevents downstream execution", async () => {

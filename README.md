@@ -34,7 +34,18 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 - Append-only transformation event log with deterministic cursor-based pagination.
 - Updated overview page (`/dashboard`) with live monthly consumption volume, active credentials, and truthful unconfigured quota state ("No quota configured").
 
-*Milestone 4 (Rate Limiting & Abuse Protection) is scheduled next.*
+**Milestone 4 — Distributed Rate Limiting & Abuse Protection** (Completed)
+- Distributed, concurrency-safe rate limiting on Node.js runtime using `@upstash/redis` and `@upstash/ratelimit`.
+- **Pre-Authentication IP Limiter**: Sliding window of 120 requests per 60 seconds per HMAC-derived client IP to protect Bearer auth and PostgreSQL from brute-force floods.
+- **Authenticated API-Key Limiter**: Token bucket with 10 tokens refill per 10 seconds and maximum burst capacity of 20 tokens to protect Sharp, memory, and CPU resources.
+- **Privacy-Preserving Identifiers**: Domain-separated HMAC-SHA-256 digests (`ip\0...` and `key\0...`) with zero plaintext IP addresses, API keys, key hashes, or database IDs stored in Redis.
+- **Trusted Client-IP Resolution**: Resolves client IP defensively from `x-vercel-forwarded-for` in production on Vercel with strict `node:net` validation, failing closed with 503 if unavailable.
+- **Fail-Closed Resilience**: Upstash timeouts (`reason === "timeout"`) and network outages immediately return sanitized `503 RATE_LIMIT_UNAVAILABLE` without leaking internals or falling back to unbounded execution.
+- **HTTP Error Contract**: `429 RATE_LIMITED` returns standardized JSON payload, `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` Unix epoch headers.
+- **Zero-Billing Guarantee**: Zero `usage_events` rows are recorded for rate-limited (429) or unavailable (503) attempts.
+- **Live Redis Integration & HTTP E2E Suites**: Dedicated guarded runner (`pnpm test:redis-integration`) and full loopback verification (`pnpm verify:http`).
+
+*Milestone 5 (Stripe Metered Billing & Reconciliation) is scheduled next.*
 
 ---
 
@@ -43,6 +54,7 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 - **Node.js**: `>=20.9.0` (compatible with Node 20.x, 22.x, 24.x)
 - **Package Manager**: `pnpm` (`>=9.0.0`)
 - **Database**: PostgreSQL (`v15+`, developed against Neon Serverless PostgreSQL)
+- **Distributed Cache / Rate Limiter**: Upstash Redis (REST-based)
 
 ---
 
@@ -75,6 +87,13 @@ cp .env.example .env.local
 | `DATABASE_ENV` | Environment marker (`development` \| `production`) | `development` |
 | `DEVELOPMENT_DATABASE_ENDPOINT_ID` | Pinned Neon endpoint identifier for fail-closed dev safety | `ep-example-development` |
 | `RUN_DB_INTEGRATION_TESTS` | Safety opt-in for live DB integration tests | `true` |
+| `HTTP_E2E_BASE_URL` | Loopback base URL for real HTTP E2E testing | `http://127.0.0.1:3000` |
+| `UPSTASH_REDIS_REST_URL` | Upstash Redis REST endpoint | `https://example-endpoint.upstash.io` |
+| `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis REST authentication token | `example-upstash-rest-token` |
+| `RATE_LIMIT_IDENTIFIER_SECRET` | HMAC secret for rate limit identifier derivation (64 hex) | `generate-using-openssl-rand-hex-32` |
+| `REDIS_ENV` | Redis environment marker (`development` \| `production`) | `development` |
+| `DEVELOPMENT_REDIS_ENDPOINT_ID` | Pinned Upstash Redis endpoint identifier | `example-endpoint` |
+| `RUN_REDIS_INTEGRATION_TESTS` | Safety opt-in for live Redis integration tests | `true` |
 
 ---
 
@@ -124,8 +143,9 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (205 tests).
-- `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (23 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite (240 tests).
+- `pnpm test:redis-integration`: Runs live Upstash Redis rate limiting integration tests (5 tests).
+- `pnpm test:integration`: Runs full live PostgreSQL and Redis integration test suite (28 tests).
 - `pnpm verify:http`: Runs real HTTP E2E verification of `POST /v1/images/transform` against running server.
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.
 - `pnpm db:check`: Checks Drizzle schema snapshot consistency.
@@ -152,15 +172,27 @@ cp .env.example .env.local
 - `fit`: `cover` | `contain` | `inside` | `fill` (Optional, default: `inside`)
 - `withoutEnlargement`: `true` | `false` (Optional, default: `true`)
 
+### Rate Limits & Headers
+- **Pre-Auth IP Limit**: 120 requests / 60 seconds (Sliding Window)
+- **Authenticated Key Limit**: 10 tokens refill / 10 seconds, burst capacity 20 tokens (Token Bucket)
+- **Rate Limited Response (`429`)**:
+  - `Retry-After`: Integer delta seconds (minimum 1)
+  - `X-RateLimit-Limit`: Maximum bucket capacity
+  - `X-RateLimit-Remaining`: Remaining tokens (`0`)
+  - `X-RateLimit-Reset`: Unix epoch timestamp in seconds
+  - `X-Request-ID`: Correlation ID
+- **Success Response (`200`)**: Exposes authenticated API key's current quota headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`).
+
 ---
 
-## What Is Intentionally Deferred (Out of Scope for M3)
+## What Is Intentionally Deferred (Out of Scope for M4)
 
 The following features are intentionally not implemented yet and are scheduled for subsequent milestones:
 
-- Rate limiting and Redis/Upstash integrations (Milestone 4).
 - Stripe customer synchronization and metered billing reporting (Milestone 5).
+- Dynamic tier-specific or paid subscription rate limits (Milestone 5).
 - Background worker queues and async job dispatch.
 - Multi-user invitations and team management.
 - Email delivery provider integration for verification links.
 - Social OAuth providers.
+- OpenTelemetry observability and Grafana/Prometheus metrics (Milestone 6).

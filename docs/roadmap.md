@@ -36,10 +36,18 @@
   - Tab-visibility-aware auto-refresh (~30s) and manual refresh transitions.
   - Updated Overview page (`/dashboard`) with live monthly consumption volume, active credentials, and links to `/dashboard/usage`.
 
-- [ ] **Milestone 4: Rate Limiting & Abuse Protection**
-  - Token bucket / sliding window rate limiting.
-  - Key-level and IP-level throttling.
-  - HTTP 429 response formatting with retry-after headers.
+- [x] **Milestone 4: Rate Limiting & Abuse Protection**
+  - Distributed, concurrency-safe rate limiting on Node.js runtime using `@upstash/redis` and `@upstash/ratelimit`.
+  - Two independent distributed limiters:
+    - **Pre-Authentication IP Limiter**: Sliding window of 120 req / 60s per HMAC-derived client IP (`image-api:ratelimit:ip:v1`).
+    - **Authenticated API-Key Limiter**: Token bucket with 10 tokens refill per 10s and burst capacity 20 tokens (`image-api:ratelimit:key:v1`).
+  - Privacy-preserving HMAC-SHA-256 identifier derivation with domain separation (`ip\0` vs `key\0`), storing zero plaintext IPs, keys, or IDs in Redis.
+  - Trusted client-IP resolution from `x-vercel-forwarded-for` in production with strict `node:net` validation, failing closed with 503 if unavailable.
+  - Fail-closed Redis resilience converting Upstash timeouts and network failures to sanitized `503 RATE_LIMIT_UNAVAILABLE`.
+  - Standardized HTTP `429 RATE_LIMITED` response with `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers.
+  - Exact route sequence: IP Limiter -> Bearer Auth -> Key Limiter -> Idempotency -> Multipart Ingestion -> Sharp Processing -> Usage Metering.
+  - Zero `usage_events` recorded on rate-limited (429) or limiter unavailable (503) requests.
+  - Guarded live Redis integration tests (`pnpm test:redis-integration`) and full real HTTP E2E verification (`pnpm verify:http`).
 
 - [ ] **Milestone 5: Stripe Metered Billing & Reconciliation**
   - Stripe Customer and Subscription creation on organization onboarding.

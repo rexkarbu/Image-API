@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "dotenv -e .env.local -e .env -- vitest run --config vitest.integration.config.ts",
+    "test:redis-integration": "dotenv -e .env.local -e .env -- vitest run tests/integration/redis-ratelimit.test.ts --config vitest.integration.config.ts",
     "db:generate": "dotenv -e .env.local -e .env -- drizzle-kit generate",
     "db:migrate": "dotenv -e .env.local -e .env -- tsx src/db/migrate.ts",
     "db:check": "dotenv -e .env.local -e .env -- drizzle-kit check",
@@ -24,6 +25,8 @@
     "pnpm": ">=9.0.0"
   },
   "dependencies": {
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.38.2",
     "better-auth": "^1.1.21",
     "busboy": "1.6.0",
     "clsx": "^2.1.1",

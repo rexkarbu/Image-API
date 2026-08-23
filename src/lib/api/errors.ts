@@ -9,6 +9,8 @@ export type ApiErrorCode =
   | "PAYLOAD_TOO_LARGE"
   | "UNSUPPORTED_IMAGE_TYPE"
   | "UNPROCESSABLE_IMAGE"
+  | "RATE_LIMITED"
+  | "RATE_LIMIT_UNAVAILABLE"
   | "AUTHENTICATION_UNAVAILABLE"
   | "METERING_UNAVAILABLE"
   | "INTERNAL_ERROR";
@@ -17,13 +19,21 @@ export class ApiError extends Error {
   readonly statusCode: number;
   readonly code: ApiErrorCode;
   readonly requestId: string;
+  readonly headers?: Record<string, string>;
 
-  constructor(statusCode: number, code: ApiErrorCode, message: string, requestId: string) {
+  constructor(
+    statusCode: number,
+    code: ApiErrorCode,
+    message: string,
+    requestId: string,
+    headers?: Record<string, string>
+  ) {
     super(message);
     this.name = "ApiError";
     this.statusCode = statusCode;
     this.code = code;
     this.requestId = requestId;
+    this.headers = headers;
   }
 }
 
@@ -32,6 +42,14 @@ export function createErrorResponse(
   requestId: string
 ): NextResponse {
   if (error instanceof ApiError) {
+    const responseHeaders: Record<string, string> = {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Request-ID": error.requestId || requestId,
+      ...(error.headers || {}),
+    };
+
     return NextResponse.json(
       {
         error: {
@@ -42,12 +60,7 @@ export function createErrorResponse(
       },
       {
         status: error.statusCode,
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-          "X-Request-ID": error.requestId || requestId,
-        },
+        headers: responseHeaders,
       }
     );
   }

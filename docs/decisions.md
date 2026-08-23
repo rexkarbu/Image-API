@@ -38,7 +38,7 @@
 
 10. **Data Retention & Foreign-Key Delete Semantics**
     - `organization_members`: `ON DELETE CASCADE` for parent user or organization removal.
-    - `api_keys`: `organization_id` uses `ON DELETE RESTRICT` (organizations with active or revoked keys cannot be silently hard-deleted). `created_by_user_id` is nullable with `ON DELETE SET NULL` so removing an individual team member retains the organization's API keys.
+    - `api_keys`: `organization_id` uses `ON DELETE RESTRICT` (organizations with active or revoked keys cannot be hard-deleted). `created_by_user_id` is nullable with `ON DELETE SET NULL` so removing an individual team member retains the organization's API keys.
     - `usage_events`: `organization_id` and `api_key_id` use `ON DELETE RESTRICT`. Usage events represent an immutable financial audit stream and must never be erased.
     - No hard-delete APIs are exposed for organizations, keys, or usage events.
 
@@ -76,3 +76,11 @@
     - Stable Cursor Pagination: Event stream pagination orders deterministically by `created_at DESC, id DESC` using opaque Base64URL cursor tokens (`createdAt_id`) to ensure zero duplicated or skipped rows across identical millisecond timestamps. Cursors are strictly validated fail-closed for length, character set, canonical JSON shape, ISO timestamp, and valid ID format.
     - Truthful Quota State & Zero-Percentage Rendering: Quotas are represented as explicitly unconfigured (`configured: false, allowedMonthlyUnits: null`) and rendered as "No quota configured", strictly forbidding synthetic quotas or fabricated progress indicators. When total units are zero, key breakdowns render `—` without progress bars.
     - Tab-Visibility Auto-Refresh: Near-real-time dashboard synchronization polls at ~30s intervals only when `document.visibilityState === "visible"` to prevent idle background resource drain and accumulates zero redundant timers.
+
+16. **Distributed Rate Limiting, Fail-Closed Upstash Redis, and Privacy-Preserving HMAC Identifiers (Milestone 4)**
+    - Two-Tier Throttling: Enforces a pre-authentication IP rate limiter (Sliding Window: 120 req / 60s) to protect auth/DB infrastructure and an authenticated API key rate limiter (Token Bucket: 10 tokens / 10s, capacity 20 tokens) to protect compute and memory resources.
+    - Privacy-Preserving HMAC Derivation: Stored Redis keys use domain-separated HMAC-SHA-256 (`ip\0` and `key\0`) with a server secret (`RATE_LIMIT_IDENTIFIER_SECRET`). No raw client IP addresses, API keys, key hashes, or database IDs are stored in Redis.
+    - Trusted Client IP: On Vercel in production, client IP is derived strictly from `x-vercel-forwarded-for` and validated via `node:net` (`isIP`), failing closed with 503 if unavailable.
+    - Fail-Closed Resilience: Upstash timeouts (`reason === "timeout"`) and network errors strictly fail closed with `503 RATE_LIMIT_UNAVAILABLE`.
+    - Standardized HTTP 429 Contract: Limit exhaustion returns `429 RATE_LIMITED` with `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` Unix epoch headers.
+    - Zero Usage Metering: Blocked (429) or unavailable (503) requests generate zero PostgreSQL `usage_events` records.
