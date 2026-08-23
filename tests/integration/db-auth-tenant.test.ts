@@ -1285,8 +1285,14 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
 
     const mismatchedEvent = dataCMismatched.eventsPage.events.find((e) => e.id === evtMismatched.id);
     expect(mismatchedEvent).toBeDefined();
-    // Must NOT reveal Org B's key name ("Key B1 Main") or keyPrefix
+    // Must return null for apiKeyId and safe placeholders for name/maskedKey
+    expect(mismatchedEvent?.apiKeyId).toBeNull();
     expect(mismatchedEvent?.apiKeyName).toBe("Unknown Key");
     expect(mismatchedEvent?.maskedKey).toBe("img_live_••••••••");
+
+    // Serialized output must contain neither the foreign key ID nor its name/prefix
+    const serializedOutput = JSON.stringify(dataCMismatched);
+    expect(serializedOutput).not.toContain(keyForOrgB.key.id);
+    expect(serializedOutput).not.toContain("Key OrgB Secret Target");
   });
 });

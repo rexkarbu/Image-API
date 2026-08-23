@@ -113,7 +113,7 @@ export function UsageEventsTable({ eventsPage, activeFilters }: UsageEventsTable
             {eventsPage.events.map((event) => (
               <tr
                 key={event.id}
-                className="hover:bg-neutral-50/60 dark:hover:bg-neutral-800/30 transition-colors"
+                className="hover:bg-neutral-50/60 dark:hover:bg-neutral-800/30 motion-safe:transition-colors"
               >
                 <td className="py-3 px-4 text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
                   {formatEventUtc(event.createdAt)}

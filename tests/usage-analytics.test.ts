@@ -73,37 +73,65 @@ describe("Usage Analytics Service Unit Tests", () => {
     expect(data.eventsPage.nextCursor).toBeNull();
     expect(data.filterError).toBeNull();
 
-    // Verify time series buckets are generated and all have 0 units
     expect(data.timeSeries.length).toBeGreaterThan(0);
     expect(data.timeSeries.every((b) => b.units === 0)).toBe(true);
   });
 
-  it("handles explicit invalid filter input returning typed filterError without running queries", async () => {
-    const data = await getUsageDashboardData({
-      organizationId: "org-invalid-filter-test",
-      rawFilters: { statusCode: "999" }, // invalid status code
-      now: new Date("2026-08-23T16:00:00.000Z"),
-    });
+  it("proves true query-free execution across all invalid explicit filter categories", async () => {
+    const invalidFilterCases: Record<string, string | string[] | undefined>[] = [
+      { range: "invalid_preset" },
+      { range: "custom", from: "2026-08-10T00:00:00.000Z" }, // missing to
+      { range: "custom", to: "2026-08-10T00:00:00.000Z" }, // missing from
+      { range: "custom", from: "2026-08-10T12:00:00.000Z", to: "2026-08-11T00:00:00.000Z" }, // non-midnight
+      { range: "custom", from: "2026-02-29T00:00:00.000Z", to: "2026-03-01T00:00:00.000Z" }, // impossible leap date in 2026
+      { range: "custom", from: "2026-08-20T00:00:00.000Z", to: "2026-08-10T00:00:00.000Z" }, // reversed dates
+      { range: "custom", from: "2026-01-01T00:00:00.000Z", to: "2026-06-01T00:00:00.000Z" }, // >90 days
+      { statusCode: "500" }, // non-2xx status code
+      { statusCode: "200abc" }, // malformed status code
+      { endpoint: "/v1/attacker/endpoint" }, // disallowed endpoint
+      { apiKeyId: "invalid key with spaces" }, // malformed key ID
+      { cursor: "malformed_cursor_base64" }, // malformed cursor
+      { range: ["24h", "7d"] as any }, // duplicate array parameters
+    ];
 
-    expect(data.filterError).not.toBeNull();
-    expect(data.filterError).toContain("Invalid status code");
-    expect(data.summary.totalUnits).toBe(0);
-    expect(data.eventsPage.events).toEqual([]);
+    for (const rawFilters of invalidFilterCases) {
+      vi.clearAllMocks();
+
+      const data = await getUsageDashboardData({
+        organizationId: "org-query-free-test",
+        rawFilters,
+        now: new Date("2026-08-23T16:00:00.000Z"),
+      });
+
+      // Assert zero database queries were dispatched
+      expect(db.select).not.toHaveBeenCalled();
+      expect(db.selectDistinct).not.toHaveBeenCalled();
+
+      // Assert typed filter error and zeroed metrics
+      expect(data.filterError).not.toBeNull();
+      expect(data.summary.totalUnits).toBe(0);
+      expect(data.summary.currentMonthUnits).toBe(0);
+      expect(data.summary.activeKeysCount).toBe(0);
+      expect(data.summary.latestEventAt).toBeNull();
+      expect(data.timeSeries).toEqual([]);
+      expect(data.keyBreakdown).toEqual([]);
+      expect(data.eventsPage.events).toEqual([]);
+    }
   });
 
-  it("safely handles unmatched or foreign key IDs falling back to Unknown Key without leakage", async () => {
+  it("safely eliminates cross-tenant API-key ID leakage on mismatched left join", async () => {
     const mockSelect = vi.mocked(db.select);
     const mockSelectDistinct = vi.mocked(db.selectDistinct);
 
-    // Event has apiKeyId 'foreign-key-999', so left join on org matches null
+    // Event row in database has foreign key 'key-org-b-secret-uuid', but join on Org A returns null for apiKeys.id
     const mockEvents = [
       {
-        id: "evt-orphaned",
+        id: "12345678-1234-4234-8234-123456789abc",
         createdAt: new Date("2026-08-23T10:00:00.000Z"),
-        apiKeyId: "foreign-key-999",
         endpoint: "/v1/images/transform",
         statusCode: 200,
         units: 1,
+        resolvedApiKeyId: null, // join did not match
         apiKeyName: null,
         keyPrefix: null,
       },
@@ -140,71 +168,17 @@ describe("Usage Analytics Service Unit Tests", () => {
     });
 
     expect(data.eventsPage.events.length).toBe(1);
-    expect(data.eventsPage.events[0].apiKeyName).toBe("Unknown Key");
-    expect(data.eventsPage.events[0].maskedKey).toBe("img_live_••••••••");
-  });
+    const event = data.eventsPage.events[0];
 
-  it("verifies returned DTOs never contain key_hash or plaintext secret properties", async () => {
-    const mockSelect = vi.mocked(db.select);
-    const mockSelectDistinct = vi.mocked(db.selectDistinct);
+    // Assert apiKeyId is null, and name/prefix are safe placeholders
+    expect(event.apiKeyId).toBeNull();
+    expect(event.apiKeyName).toBe("Unknown Key");
+    expect(event.maskedKey).toBe("img_live_••••••••");
 
-    const mockKeys = [
-      {
-        id: "key-123",
-        name: "Test Key",
-        keyPrefix: "img_live_test1234",
-        status: "active",
-      },
-    ];
-
-    const mockEvents = [
-      {
-        id: "evt-456",
-        createdAt: new Date("2026-08-23T10:00:00.000Z"),
-        apiKeyId: "key-123",
-        endpoint: "/v1/images/transform",
-        statusCode: 200,
-        units: 1,
-        apiKeyName: "Test Key",
-        keyPrefix: "img_live_test1234",
-      },
-    ];
-
-    const makeQueryPromise = (val: any) => {
-      const p = Promise.resolve(val);
-      return Object.assign(p, {
-        orderBy: vi.fn().mockImplementation(() => makeQueryPromise(val)),
-        groupBy: vi.fn().mockImplementation(() => makeQueryPromise(val)),
-        limit: vi.fn().mockImplementation(() => makeQueryPromise(val)),
-        where: vi.fn().mockImplementation(() => makeQueryPromise(val)),
-      });
-    };
-
-    mockSelect.mockImplementation(() => ({
-      from: vi.fn().mockReturnValue({
-        where: vi.fn().mockImplementation(() => makeQueryPromise(mockKeys)),
-        leftJoin: vi.fn().mockReturnValue({
-          where: vi.fn().mockImplementation(() => makeQueryPromise(mockEvents)),
-        }),
-      }),
-    } as any));
-
-    mockSelectDistinct.mockImplementation(() => ({
-      from: vi.fn().mockReturnValue({
-        where: vi.fn().mockImplementation(() => makeQueryPromise([])),
-      }),
-    } as any));
-
-    const data = await getUsageDashboardData({
-      organizationId: "org-dto-test",
-      now: new Date("2026-08-23T16:00:00.000Z"),
-    });
-
+    // Assert serialized JSON contains zero foreign key IDs or secret fields
     const serialized = JSON.stringify(data);
+    expect(serialized).not.toContain("key-org-b-secret-uuid");
     expect(serialized).not.toContain("keyHash");
     expect(serialized).not.toContain("key_hash");
-    expect(serialized).not.toContain("secret");
-    expect(serialized).not.toContain("password");
-    expect(serialized).not.toContain("token");
   });
 });

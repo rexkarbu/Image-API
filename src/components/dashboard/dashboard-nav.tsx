@@ -32,7 +32,7 @@ export function DashboardNav() {
             href={item.href}
             aria-current={isActive ? "page" : undefined}
             className={clsx(
-              "px-3 py-1.5 rounded-md text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 dark:focus-visible:ring-neutral-600",
+              "px-3 py-1.5 rounded-md text-xs font-medium motion-safe:transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 dark:focus-visible:ring-neutral-600",
               isActive
                 ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
                 : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800"

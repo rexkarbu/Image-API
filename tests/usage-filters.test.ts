@@ -8,11 +8,12 @@ import {
   computeCalendarDayStartUtc,
   computeCalendarDayEndUtc,
   MAX_CUSTOM_RANGE_DAYS,
+  isValidCalendarDate,
 } from "@/lib/validations/usage-filters";
-import { UsageKeyBreakdownDto, QuotaSummaryDto } from "@/types/usage";
 
-describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
+describe("Usage Filters, Range Math & Canonical Cursor Validation", () => {
   const fixedNow = new Date("2026-08-23T16:00:00.000Z");
+  const validUuid = "12345678-1234-4234-8234-123456789abc";
 
   it("defaults cleanly to 30d preset when no parameters are provided", () => {
     const res = parseUsageFilters({}, fixedNow);
@@ -33,15 +34,15 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     expect(parseUsageFilters({ range: "month" }, fixedNow).filters.range).toBe("month");
   });
 
-  it("rejects invalid date range preset with typed error", () => {
+  it("rejects invalid date range preset with generic typed error", () => {
     const res = parseUsageFilters({ range: "invalid_preset" }, fixedNow);
     expect(res.success).toBe(false);
     if (!res.success) {
-      expect(res.error).toContain("Invalid date range preset");
+      expect(res.error).toBe("Invalid date range preset.");
     }
   });
 
-  it("parses valid custom date ranges within 90 days limit", () => {
+  it("parses valid canonical custom date ranges within 90 days limit", () => {
     const from = "2026-08-01T00:00:00.000Z";
     const to = "2026-08-16T00:00:00.000Z"; // 15 full calendar days
     const res = parseUsageFilters({ range: "custom", from, to }, fixedNow);
@@ -50,6 +51,26 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     expect(res.filters.range).toBe("custom");
     expect(res.filters.from).toBe(from);
     expect(res.filters.to).toBe(to);
+  });
+
+  it("strictly enforces canonical midnight UTC format on custom date range", () => {
+    const validFrom = "2026-08-01T00:00:00.000Z";
+    const validTo = "2026-08-05T00:00:00.000Z";
+
+    // Non-midnight UTC timestamps
+    expect(parseUsageFilters({ range: "custom", from: "2026-08-01T12:00:00.000Z", to: validTo }, fixedNow).success).toBe(false);
+    expect(parseUsageFilters({ range: "custom", from: "2026-08-01T23:59:59.999Z", to: validTo }, fixedNow).success).toBe(false);
+
+    // Locale / date-only strings without canonical UTC midnight format
+    expect(parseUsageFilters({ range: "custom", from: "2026-08-01", to: validTo }, fixedNow).success).toBe(false);
+    expect(parseUsageFilters({ range: "custom", from: "08/01/2026", to: validTo }, fixedNow).success).toBe(false);
+
+    // Offset timestamps
+    expect(parseUsageFilters({ range: "custom", from: "2026-08-01T00:00:00+00:00", to: validTo }, fixedNow).success).toBe(false);
+
+    // Impossible calendar dates (e.g. Feb 29 in non-leap year 2026, April 31)
+    expect(parseUsageFilters({ range: "custom", from: "2026-02-29T00:00:00.000Z", to: "2026-03-01T00:00:00.000Z" }, fixedNow).success).toBe(false);
+    expect(parseUsageFilters({ range: "custom", from: "2026-04-31T00:00:00.000Z", to: "2026-05-01T00:00:00.000Z" }, fixedNow).success).toBe(false);
   });
 
   it("rejects custom range when from or to date is missing", () => {
@@ -104,14 +125,19 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     const to2 = computeCalendarDayEndUtc("2026-08-11");
     expect(to2).toBe("2026-08-12T00:00:00.000Z");
 
-    // Leap-day & month boundary: Feb 28, 2024 to Feb 29, 2024
+    // Leap-day & month boundary: Feb 28, 2024 to Feb 29, 2024 (2024 is leap year)
     const fromLeap = computeCalendarDayStartUtc("2024-02-28");
     const toLeap = computeCalendarDayEndUtc("2024-02-29");
     expect(fromLeap).toBe("2024-02-28T00:00:00.000Z");
     expect(toLeap).toBe("2024-03-01T00:00:00.000Z");
 
-    // Invalid calendar date rejected
+    // Non-leap year impossible date rejected (2026 is NOT a leap year)
+    expect(computeCalendarDayStartUtc("2026-02-29")).toBeNull();
+    expect(computeCalendarDayEndUtc("2026-02-29")).toBeNull();
+
+    // Invalid calendar dates rejected
     expect(computeCalendarDayEndUtc("2026-02-30")).toBeNull();
+    expect(computeCalendarDayStartUtc("2026-04-31")).toBeNull();
     expect(computeCalendarDayStartUtc("invalid")).toBeNull();
   });
 
@@ -120,7 +146,6 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     expect(parseUsageFilters({ statusCode: "201" }, fixedNow).filters.statusCode).toBe(201);
     expect(parseUsageFilters({ statusCode: "299" }, fixedNow).filters.statusCode).toBe(299);
 
-    // Reject non-3-digit or malformed formats with typed error
     const badCodes = ["200abc", "200.5", "+200", " 200 ", "0200", "199", "300", "400", "500", "abc"];
     for (const bad of badCodes) {
       const res = parseUsageFilters({ statusCode: bad }, fixedNow);
@@ -132,7 +157,6 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     const validId = "key_live_12345-abc_XYZ";
     expect(parseUsageFilters({ apiKeyId: validId }, fixedNow).filters.apiKeyId).toBe(validId);
 
-    // Malformed ID with invalid characters or too long
     const resBad = parseUsageFilters({ apiKeyId: "key with spaces" }, fixedNow);
     expect(resBad.success).toBe(false);
 
@@ -153,7 +177,7 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     const res = parseUsageFilters({ range: ["24h", "7d"] } as any, fixedNow);
     expect(res.success).toBe(false);
     if (!res.success) {
-      expect(res.error).toContain("Duplicate filter parameters");
+      expect(res.error).toBe("Duplicate filter parameters are not permitted.");
     }
   });
 
@@ -186,14 +210,12 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
   });
 
   it("selects hourly buckets for custom ranges <= 48 hours and daily for > 48 hours", () => {
-    // 24 hour custom range -> hour
     const b1 = computeRangeBoundaries(
       { range: "custom", from: "2026-08-10T00:00:00.000Z", to: "2026-08-11T00:00:00.000Z" },
       fixedNow
     );
     expect(b1.bucketInterval).toBe("hour");
 
-    // 5 day custom range -> day
     const b2 = computeRangeBoundaries(
       { range: "custom", from: "2026-08-10T00:00:00.000Z", to: "2026-08-15T00:00:00.000Z" },
       fixedNow
@@ -202,7 +224,6 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
   });
 
   it("generates zero-filled time buckets using exclusive end boundary [start, end)", () => {
-    // August 20 00:00 to August 23 00:00 must produce exactly 3 daily buckets: Aug 20, 21, 22
     const start = new Date("2026-08-20T00:00:00.000Z");
     const end = new Date("2026-08-23T00:00:00.000Z");
 
@@ -213,7 +234,6 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     expect(buckets[1].label).toBe("Aug 21");
     expect(buckets[2].label).toBe("Aug 22");
 
-    // Hourly buckets: 14:00 to 17:00 must produce 14:00, 15:00, 16:00 (3 buckets)
     const hourStart = new Date("2026-08-23T14:00:00.000Z");
     const hourEnd = new Date("2026-08-23T17:00:00.000Z");
     const hourBuckets = generateTimeBuckets(hourStart, hourEnd, "hour");
@@ -223,46 +243,53 @@ describe("Usage Filters, Range Math & Cursor Unit Tests", () => {
     expect(hourBuckets[2].label).toBe("16:00");
   });
 
-  it("encodes and decodes opaque pagination cursors deterministically", () => {
+  it("encodes and decodes opaque pagination cursors deterministically with UUID event ID", () => {
     const date = new Date("2026-08-23T12:34:56.789Z");
-    const eventId = "evt-uuid-12345";
 
-    const cursor = encodeCursor(date, eventId);
+    const cursor = encodeCursor(date, validUuid);
     expect(typeof cursor).toBe("string");
     expect(cursor.length).toBeGreaterThan(0);
 
     const decoded = decodeCursor(cursor, fixedNow);
     expect(decoded).not.toBeNull();
     expect(decoded?.createdAt.toISOString()).toBe(date.toISOString());
-    expect(decoded?.id).toBe(eventId);
+    expect(decoded?.id).toBe(validUuid);
   });
 
-  it("hardened cursor validation rejects all malformed, future, or oversized cursors fail-closed", () => {
+  it("hardened cursor validation rejects non-UUID IDs, non-canonical ISO strings, future dates, and malformed inputs fail-closed", () => {
     expect(decodeCursor(undefined, fixedNow)).toBeNull();
     expect(decodeCursor(null, fixedNow)).toBeNull();
     expect(decodeCursor("", fixedNow)).toBeNull();
     expect(decodeCursor("not-base64-json", fixedNow)).toBeNull();
-    expect(decodeCursor("a".repeat(257), fixedNow)).toBeNull(); // >256 chars
+    expect(decodeCursor("a".repeat(257), fixedNow)).toBeNull();
 
-    // Non-canonical shapes / extra fields
-    const extraField = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: "id", extra: "val" })).toString("base64url");
+    // Extra fields
+    const extraField = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: validUuid, extra: "val" })).toString("base64url");
     expect(decodeCursor(extraField, fixedNow)).toBeNull();
 
+    // Non-canonical date without milliseconds (.000Z)
+    const noMsDate = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00Z", i: validUuid })).toString("base64url");
+    expect(decodeCursor(noMsDate, fixedNow)).toBeNull();
+
     // Invalid date string
-    const invalidDate = Buffer.from(JSON.stringify({ c: "not-a-date", i: "id" })).toString("base64url");
+    const invalidDate = Buffer.from(JSON.stringify({ c: "not-a-date", i: validUuid })).toString("base64url");
     expect(decodeCursor(invalidDate, fixedNow)).toBeNull();
+
+    // Impossible calendar date (Feb 29, 2026)
+    const impossibleDate = Buffer.from(JSON.stringify({ c: "2026-02-29T00:00:00.000Z", i: validUuid })).toString("base64url");
+    expect(decodeCursor(impossibleDate, fixedNow)).toBeNull();
 
     // Future timestamp (>60s in future)
     const futureDate = new Date(fixedNow.getTime() + 120_000).toISOString();
-    const futureCursor = Buffer.from(JSON.stringify({ c: futureDate, i: "id" })).toString("base64url");
+    const futureCursor = Buffer.from(JSON.stringify({ c: futureDate, i: validUuid })).toString("base64url");
     expect(decodeCursor(futureCursor, fixedNow)).toBeNull();
+
+    // Non-UUID ID format
+    const nonUuid = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: "evt-not-a-uuid" })).toString("base64url");
+    expect(decodeCursor(nonUuid, fixedNow)).toBeNull();
 
     // Empty ID
     const emptyId = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: "" })).toString("base64url");
     expect(decodeCursor(emptyId, fixedNow)).toBeNull();
-
-    // Malformed ID with disallowed characters
-    const badId = Buffer.from(JSON.stringify({ c: "2026-08-23T00:00:00.000Z", i: "id with space" })).toString("base64url");
-    expect(decodeCursor(badId, fixedNow)).toBeNull();
   });
 });

@@ -124,7 +124,7 @@ cp .env.example .env.local
 - `pnpm start`: Runs production build.
 - `pnpm lint`: Runs ESLint for Next.js and TypeScript rules.
 - `pnpm typecheck`: Validates TypeScript strict typing without emitting files.
-- `pnpm test`: Runs Vitest in-memory unit test suite (187 tests).
+- `pnpm test`: Runs Vitest in-memory unit test suite (189 tests).
 - `pnpm test:integration`: Runs live PostgreSQL integration suite with safety guards (23 tests).
 - `pnpm verify:http`: Runs real HTTP E2E verification of `POST /v1/images/transform` against running server.
 - `pnpm db:generate`: Generates SQL migration files from Drizzle schema.

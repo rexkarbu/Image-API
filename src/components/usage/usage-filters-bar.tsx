@@ -10,7 +10,7 @@ import {
   computeCalendarDayStartUtc,
   computeCalendarDayEndUtc,
   MAX_CUSTOM_RANGE_DAYS,
-} from "@/lib/validations/usage-filters";
+} from "@/lib/validations/usage-calendar";
 
 interface UsageFiltersBarProps {
   activeFilters: UsageFilters;
@@ -121,7 +121,7 @@ function CustomDateRangePanel({
           size="sm"
           onClick={handleApply}
           disabled={!customFrom || !customTo}
-          className="h-8 text-xs px-3 font-medium"
+          className="h-8 text-xs px-3 font-medium motion-safe:transition-colors"
         >
           Apply Range
         </Button>
@@ -242,7 +242,7 @@ export function UsageFiltersBar({
             variant="outline"
             size="sm"
             onClick={handleResetFilters}
-            className="h-7 text-xs border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900/40 space-x-1"
+            className="h-7 text-xs border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900/40 space-x-1 motion-safe:transition-colors"
           >
             <RotateCcw className="h-3 w-3" />
             <span>Reset to default</span>
@@ -264,7 +264,7 @@ export function UsageFiltersBar({
                 variant={isSelected ? "default" : "outline"}
                 size="sm"
                 onClick={() => handlePresetClick(preset.value)}
-                className={`h-7 px-2.5 text-xs font-mono transition-colors focus-visible:ring-2 ${
+                className={`h-7 px-2.5 text-xs font-mono motion-safe:transition-colors focus-visible:ring-2 ${
                   isSelected
                     ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
                     : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
@@ -281,7 +281,7 @@ export function UsageFiltersBar({
             variant="ghost"
             size="sm"
             onClick={handleResetFilters}
-            className="h-7 px-2 text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 space-x-1"
+            className="h-7 px-2 text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 space-x-1 motion-safe:transition-colors"
           >
             <X className="h-3 w-3" />
             <span>Reset filters</span>
@@ -310,7 +310,7 @@ export function UsageFiltersBar({
             id="filter-api-key"
             value={activeFilters.apiKeyId || ""}
             onChange={(e) => applyFilters({ apiKeyId: e.target.value || undefined })}
-            className="w-full h-8 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-xs font-sans text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-neutral-400"
+            className="w-full h-8 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-xs font-sans text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-neutral-400 motion-safe:transition-colors"
           >
             <option value="">All API Keys</option>
             {filterOptions.apiKeyOptions.map((k) => (
@@ -330,7 +330,7 @@ export function UsageFiltersBar({
             id="filter-endpoint"
             value={activeFilters.endpoint || ""}
             onChange={(e) => applyFilters({ endpoint: e.target.value || undefined })}
-            className="w-full h-8 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-xs font-mono text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-neutral-400"
+            className="w-full h-8 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-xs font-mono text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-neutral-400 motion-safe:transition-colors"
           >
             <option value="">All Endpoints</option>
             {filterOptions.endpointOptions.map((e) => (
@@ -354,7 +354,7 @@ export function UsageFiltersBar({
                 statusCode: e.target.value ? parseInt(e.target.value, 10) : undefined,
               })
             }
-            className="w-full h-8 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-xs font-mono text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-neutral-400"
+            className="w-full h-8 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-xs font-mono text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-neutral-400 motion-safe:transition-colors"
           >
             <option value="">All Status Codes</option>
             {filterOptions.statusCodeOptions.map((s) => (

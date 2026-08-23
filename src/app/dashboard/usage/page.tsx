@@ -58,7 +58,7 @@ export default async function UsageDashboardPage({ searchParams }: UsagePageProp
       />
 
       {/* 2. Interactive Filter Bar */}
-      <Suspense fallback={<div className="h-20 bg-neutral-100 dark:bg-neutral-800 rounded-lg animate-pulse" />}>
+      <Suspense fallback={<div className="h-20 bg-neutral-100 dark:bg-neutral-800 rounded-lg motion-safe:animate-pulse" />}>
         <UsageFiltersBar
           activeFilters={data.activeFilters}
           filterOptions={data.filterOptions}
@@ -81,7 +81,7 @@ export default async function UsageDashboardPage({ searchParams }: UsagePageProp
           />
         </div>
         <div className="lg:col-span-2">
-          <Suspense fallback={<div className="h-64 bg-neutral-100 dark:bg-neutral-800 rounded-lg animate-pulse" />}>
+          <Suspense fallback={<div className="h-64 bg-neutral-100 dark:bg-neutral-800 rounded-lg motion-safe:animate-pulse" />}>
             <UsageEventsTable
               eventsPage={data.eventsPage}
               activeFilters={data.activeFilters}

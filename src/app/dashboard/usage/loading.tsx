@@ -1,6 +1,6 @@
 export default function UsageLoading() {
   return (
-    <div className="space-y-6 animate-pulse" aria-busy="true" aria-label="Loading usage data">
+    <div className="space-y-6 motion-safe:animate-pulse" aria-busy="true" aria-label="Loading usage data">
       {/* Header Skeleton */}
       <div className="space-y-2">
         <div className="h-4 w-32 bg-neutral-200 dark:bg-neutral-800 rounded" />

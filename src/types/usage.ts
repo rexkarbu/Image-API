@@ -50,7 +50,7 @@ export interface UsageKeyBreakdownDto {
 export interface UsageEventDto {
   id: string;
   createdAt: string; // ISO string (UTC)
-  apiKeyId: string;
+  apiKeyId: string | null; // Tenant-resolved API key ID (null if mismatched/deleted/unresolved)
   apiKeyName: string;
   keyPrefix: string;
   maskedKey: string;

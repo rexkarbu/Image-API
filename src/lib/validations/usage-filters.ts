@@ -1,8 +1,23 @@
-import { UsageFilters, UsageRangePreset } from "@/types/usage";
+import "server-only";
 
-export const MAX_CUSTOM_RANGE_DAYS = 90;
-export const MAX_CUSTOM_RANGE_MS = MAX_CUSTOM_RANGE_DAYS * 24 * 60 * 60 * 1000;
-export const ALLOWED_ENDPOINTS = ["/v1/images/transform"] as const;
+import { UsageFilters, UsageRangePreset } from "@/types/usage";
+import {
+  MAX_CUSTOM_RANGE_DAYS,
+  MAX_CUSTOM_RANGE_MS,
+  ALLOWED_ENDPOINTS,
+  isValidCalendarDate,
+  computeCalendarDayStartUtc,
+  computeCalendarDayEndUtc,
+} from "@/lib/validations/usage-calendar";
+
+export {
+  MAX_CUSTOM_RANGE_DAYS,
+  MAX_CUSTOM_RANGE_MS,
+  ALLOWED_ENDPOINTS,
+  isValidCalendarDate,
+  computeCalendarDayStartUtc,
+  computeCalendarDayEndUtc,
+};
 
 export interface RangeBoundaries {
   start: Date;
@@ -20,9 +35,11 @@ export type ParseFiltersResult =
   | { success: false; error: string; filters: UsageFilters };
 
 const BASE64URL_REGEX = /^[A-Za-z0-9_-]+$/;
-const ISO_UTC_DATE_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const CANONICAL_CUSTOM_DATE_REGEX = /^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/;
+const CANONICAL_ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATUS_CODE_REGEX = /^2\d{2}$/;
-const ID_FORMAT_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
+const API_KEY_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /**
  * Encodes an opaque, URL-safe pagination cursor for deterministic pagination.
@@ -34,7 +51,7 @@ export function encodeCursor(createdAt: Date, id: string): string {
 
 /**
  * Decodes and strictly validates an opaque pagination cursor.
- * Returns null fail-closed if the cursor is malformed, has invalid dates, empty IDs, or unexpected keys.
+ * Returns null fail-closed if the cursor is malformed, non-canonical, has invalid dates, non-UUID IDs, or unexpected keys.
  */
 export function decodeCursor(
   cursorString?: string | null,
@@ -72,12 +89,13 @@ export function decodeCursor(
       return null;
     }
 
-    if (!ISO_UTC_DATE_REGEX.test(parsed.c)) {
+    // Must match exact canonical ISO timestamp with 3 millisecond digits
+    if (!CANONICAL_ISO_TIMESTAMP_REGEX.test(parsed.c)) {
       return null;
     }
 
     const date = new Date(parsed.c);
-    if (isNaN(date.getTime())) {
+    if (isNaN(date.getTime()) || date.toISOString() !== parsed.c) {
       return null;
     }
 
@@ -86,14 +104,14 @@ export function decodeCursor(
       return null;
     }
 
-    const id = parsed.i.trim();
-    if (!ID_FORMAT_REGEX.test(id) || parsed.i !== id) {
+    // Must match exact UUID format of usage_events.id
+    if (!UUID_REGEX.test(parsed.i)) {
       return null;
     }
 
     return {
       createdAt: date,
-      id,
+      id: parsed.i,
     };
   } catch {
     return null;
@@ -101,59 +119,29 @@ export function decodeCursor(
 }
 
 /**
- * Helper to compute the calendar-day exclusive end boundary in UTC (00:00:00.000Z on the next day).
+ * Helper to strictly validate a canonical midnight UTC date string.
  */
-export function computeCalendarDayEndUtc(toDateString: string): string | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(toDateString)) {
-    return null;
+function isValidCanonicalCustomDate(dateStr: string): boolean {
+  if (!CANONICAL_CUSTOM_DATE_REGEX.test(dateStr)) {
+    return false;
   }
 
-  const parts = toDateString.split("-").map((p) => parseInt(p, 10));
-  const year = parts[0];
-  const month = parts[1] - 1; // 0-indexed
-  const day = parts[2];
-
-  const date = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
-  if (
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() !== month ||
-    date.getUTCDate() !== day
-  ) {
-    return null;
-  }
-
-  // Advance by exactly 1 calendar day
-  date.setUTCDate(date.getUTCDate() + 1);
-  return date.toISOString();
-}
-
-/**
- * Helper to compute the calendar-day inclusive start boundary in UTC (00:00:00.000Z).
- */
-export function computeCalendarDayStartUtc(fromDateString: string): string | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDateString)) {
-    return null;
-  }
-
-  const parts = fromDateString.split("-").map((p) => parseInt(p, 10));
+  const parts = dateStr.substring(0, 10).split("-").map((p) => parseInt(p, 10));
   const year = parts[0];
   const month = parts[1] - 1;
   const day = parts[2];
 
-  const date = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
-  if (
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() !== month ||
-    date.getUTCDate() !== day
-  ) {
-    return null;
+  if (!isValidCalendarDate(year, month, day)) {
+    return false;
   }
 
-  return date.toISOString();
+  const d = new Date(dateStr);
+  return !isNaN(d.getTime()) && d.toISOString() === dateStr;
 }
 
 /**
  * Parses and strictly normalizes search query parameters into a typed validation result.
+ * Any malformed explicit filter fails closed without executing database operations.
  */
 export function parseUsageFilters(
   rawParams: Record<string, string | string[] | undefined>,
@@ -190,7 +178,7 @@ export function parseUsageFilters(
   ) {
     return {
       success: false,
-      error: "Duplicate filter parameters are not allowed.",
+      error: "Duplicate filter parameters are not permitted.",
       filters: { range: "30d" },
     };
   }
@@ -204,7 +192,7 @@ export function parseUsageFilters(
     if (!rawRange.val || !validPresets.includes(rawRange.val as UsageRangePreset)) {
       return {
         success: false,
-        error: `Invalid date range preset: '${rawRange.val}'.`,
+        error: "Invalid date range preset.",
         filters: { range: "30d" },
       };
     }
@@ -220,16 +208,16 @@ export function parseUsageFilters(
       };
     }
 
-    const fromDate = new Date(rawFrom.val);
-    const toDate = new Date(rawTo.val);
-
-    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+    if (!isValidCanonicalCustomDate(rawFrom.val) || !isValidCanonicalCustomDate(rawTo.val)) {
       return {
         success: false,
-        error: "Custom date range contains invalid date values.",
+        error: "Custom date range contains invalid or non-canonical date values.",
         filters: { range: "30d" },
       };
     }
+
+    const fromDate = new Date(rawFrom.val);
+    const toDate = new Date(rawTo.val);
 
     if (fromDate.getTime() >= toDate.getTime()) {
       return {
@@ -258,7 +246,7 @@ export function parseUsageFilters(
     if (!rawStatusCode.val || !STATUS_CODE_REGEX.test(rawStatusCode.val)) {
       return {
         success: false,
-        error: `Invalid status code: '${rawStatusCode.val}'. Must be an integer between 200 and 299.`,
+        error: "Invalid status code filter. Must be an integer between 200 and 299.",
         filters: { range: "30d" },
       };
     }
@@ -268,10 +256,10 @@ export function parseUsageFilters(
   // Validate API key ID
   let apiKeyId: string | undefined;
   if (rawApiKeyId.isPresent) {
-    if (!rawApiKeyId.val || !ID_FORMAT_REGEX.test(rawApiKeyId.val)) {
+    if (!rawApiKeyId.val || !API_KEY_ID_REGEX.test(rawApiKeyId.val)) {
       return {
         success: false,
-        error: "Invalid API key ID format.",
+        error: "Invalid API key identifier format.",
         filters: { range: "30d" },
       };
     }
@@ -284,7 +272,7 @@ export function parseUsageFilters(
     if (!rawEndpoint.val || !ALLOWED_ENDPOINTS.includes(rawEndpoint.val as any)) {
       return {
         success: false,
-        error: `Invalid endpoint filter: '${rawEndpoint.val}'.`,
+        error: "Invalid endpoint filter.",
         filters: { range: "30d" },
       };
     }

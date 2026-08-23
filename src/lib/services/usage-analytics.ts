@@ -20,6 +20,7 @@ import {
   generateTimeBuckets,
   decodeCursor,
   encodeCursor,
+  ALLOWED_ENDPOINTS,
 } from "@/lib/validations/usage-filters";
 
 export interface GetUsageAnalyticsInput {
@@ -43,10 +44,42 @@ export async function getUsageDashboardData(
     throw new Error("Security Violation: organizationId is required for usage analytics queries.");
   }
 
+  // 1. Validate all explicit filters BEFORE executing any database queries
   const filterValidation = parseUsageFilters(rawFilters || {}, now);
-  const activeFilters = filterValidation.filters;
-  const filterError = filterValidation.success ? null : filterValidation.error;
+  if (!filterValidation.success) {
+    // Fail-closed: Return immediately without executing ANY database operations
+    return {
+      summary: {
+        totalUnits: 0,
+        currentMonthUnits: 0,
+        activeKeysCount: 0,
+        latestEventAt: null,
+        quota: {
+          configured: false,
+          allowedMonthlyUnits: null,
+          usedMonthlyUnits: 0,
+          remainingMonthlyUnits: null,
+          percentUsed: null,
+        },
+      },
+      timeSeries: [],
+      keyBreakdown: [],
+      eventsPage: {
+        events: [],
+        nextCursor: null,
+        hasMore: false,
+      },
+      filterOptions: {
+        apiKeyOptions: [],
+        endpointOptions: [...ALLOWED_ENDPOINTS],
+        statusCodeOptions: [200],
+      },
+      activeFilters: filterValidation.filters,
+      filterError: filterValidation.error,
+    };
+  }
 
+  const activeFilters = filterValidation.filters;
   const boundaries = computeRangeBoundaries(activeFilters, now);
   const startOfMonth = getUtcMonthStart(now);
 
@@ -67,7 +100,7 @@ export async function getUsageDashboardData(
     periodConditions.push(eq(usageEvents.statusCode, activeFilters.statusCode));
   }
 
-  // 1. Fetch Summary, Time-Series, Keys, Events, and Filter Options in parallel
+  // 2. Fetch Summary, Time-Series, Keys, Events, and Filter Options in parallel
   const [
     selectedPeriodUnitsRes,
     currentMonthUnitsRes,
@@ -81,12 +114,10 @@ export async function getUsageDashboardData(
     distinctStatusCodesRes,
   ] = await Promise.all([
     // Selected period total units
-    filterError
-      ? Promise.resolve([{ total: "0" }])
-      : db
-          .select({ total: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)` })
-          .from(usageEvents)
-          .where(and(...periodConditions)),
+    db
+      .select({ total: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)` })
+      .from(usageEvents)
+      .where(and(...periodConditions)),
 
     // Current month total units (strictly org scoped)
     db
@@ -119,27 +150,25 @@ export async function getUsageDashboardData(
       .where(eq(usageEvents.organizationId, organizationId)),
 
     // Time-series aggregation (strictly org scoped)
-    filterError
-      ? Promise.resolve([])
-      : boundaries.bucketInterval === "hour"
-        ? db
-            .select({
-              bucket: sql<string>`to_char(date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
-              units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
-            })
-            .from(usageEvents)
-            .where(and(...periodConditions))
-            .groupBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
-            .orderBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`)
-        : db
-            .select({
-              bucket: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"00:00:00.000"Z"')`,
-              units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
-            })
-            .from(usageEvents)
-            .where(and(...periodConditions))
-            .groupBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
-            .orderBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`),
+    boundaries.bucketInterval === "hour"
+      ? db
+          .select({
+            bucket: sql<string>`to_char(date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+            units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
+          })
+          .from(usageEvents)
+          .where(and(...periodConditions))
+          .groupBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
+          .orderBy(sql`date_trunc('hour', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`)
+      : db
+          .select({
+            bucket: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"00:00:00.000"Z"')`,
+            units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
+          })
+          .from(usageEvents)
+          .where(and(...periodConditions))
+          .groupBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC')`)
+          .orderBy(sql`date_trunc('day', ${usageEvents.createdAt} AT TIME ZONE 'UTC') ASC`),
 
     // Organization's API keys for breakdown & filters (strictly org scoped)
     db
@@ -154,59 +183,55 @@ export async function getUsageDashboardData(
       .orderBy(desc(apiKeys.createdAt)),
 
     // Usage by API key in selected period (strictly org scoped)
-    filterError
-      ? Promise.resolve([])
-      : db
-          .select({
-            apiKeyId: usageEvents.apiKeyId,
-            units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
-          })
-          .from(usageEvents)
-          .where(and(...periodConditions))
-          .groupBy(usageEvents.apiKeyId),
+    db
+      .select({
+        apiKeyId: usageEvents.apiKeyId,
+        units: sql<string>`COALESCE(SUM(${usageEvents.units}), 0)`,
+      })
+      .from(usageEvents)
+      .where(and(...periodConditions))
+      .groupBy(usageEvents.apiKeyId),
 
-    // Event stream with stable cursor pagination (strictly org scoped with explicit tenant-scoped join)
-    filterError
-      ? Promise.resolve([])
-      : (() => {
-          const eventConditions = [...periodConditions];
-          const decodedCursor = decodeCursor(activeFilters.cursor, now);
+    // Event stream with stable cursor pagination and tenant-isolated API key metadata
+    (() => {
+      const eventConditions = [...periodConditions];
+      const decodedCursor = decodeCursor(activeFilters.cursor, now);
 
-          if (decodedCursor) {
-            eventConditions.push(
-              or(
-                lt(usageEvents.createdAt, decodedCursor.createdAt),
-                and(
-                  eq(usageEvents.createdAt, decodedCursor.createdAt),
-                  lt(usageEvents.id, decodedCursor.id)
-                )
-              )!
-            );
-          }
-
-          return db
-            .select({
-              id: usageEvents.id,
-              createdAt: usageEvents.createdAt,
-              apiKeyId: usageEvents.apiKeyId,
-              endpoint: usageEvents.endpoint,
-              statusCode: usageEvents.statusCode,
-              units: usageEvents.units,
-              apiKeyName: apiKeys.name,
-              keyPrefix: apiKeys.keyPrefix,
-            })
-            .from(usageEvents)
-            .leftJoin(
-              apiKeys,
-              and(
-                eq(usageEvents.apiKeyId, apiKeys.id),
-                eq(apiKeys.organizationId, organizationId)
-              )
+      if (decodedCursor) {
+        eventConditions.push(
+          or(
+            lt(usageEvents.createdAt, decodedCursor.createdAt),
+            and(
+              eq(usageEvents.createdAt, decodedCursor.createdAt),
+              lt(usageEvents.id, decodedCursor.id)
             )
-            .where(and(...eventConditions))
-            .orderBy(desc(usageEvents.createdAt), desc(usageEvents.id))
-            .limit(PAGE_SIZE + 1);
-        })(),
+          )!
+        );
+      }
+
+      return db
+        .select({
+          id: usageEvents.id,
+          createdAt: usageEvents.createdAt,
+          endpoint: usageEvents.endpoint,
+          statusCode: usageEvents.statusCode,
+          units: usageEvents.units,
+          resolvedApiKeyId: apiKeys.id,
+          apiKeyName: apiKeys.name,
+          keyPrefix: apiKeys.keyPrefix,
+        })
+        .from(usageEvents)
+        .leftJoin(
+          apiKeys,
+          and(
+            eq(usageEvents.apiKeyId, apiKeys.id),
+            eq(apiKeys.organizationId, organizationId)
+          )
+        )
+        .where(and(...eventConditions))
+        .orderBy(desc(usageEvents.createdAt), desc(usageEvents.id))
+        .limit(PAGE_SIZE + 1);
+    })(),
 
     // Distinct endpoints in org for filter dropdown
     db
@@ -223,7 +248,7 @@ export async function getUsageDashboardData(
       .limit(10),
   ]);
 
-  // 2. Parse Summary Metrics
+  // 3. Parse Summary Metrics
   const totalUnits = parseInt(selectedPeriodUnitsRes[0]?.total || "0", 10);
   const currentMonthUnits = parseInt(currentMonthUnitsRes[0]?.total || "0", 10);
   const activeKeysCount = activeKeysCountRes[0]?.count || 0;
@@ -245,7 +270,7 @@ export async function getUsageDashboardData(
     },
   };
 
-  // 3. Build Time-Series with Zero-Filled Buckets
+  // 4. Build Time-Series with Zero-Filled Buckets
   const zeroBuckets = generateTimeBuckets(
     boundaries.start,
     boundaries.end,
@@ -267,7 +292,7 @@ export async function getUsageDashboardData(
     units: bucketMap.get(b.timestamp) ?? 0,
   }));
 
-  // 4. Build API Key Usage Breakdown
+  // 5. Build API Key Usage Breakdown
   const keyUsageMap = new Map<string, number>();
   for (const row of keyUsageRes) {
     keyUsageMap.set(row.apiKeyId, parseInt(row.units || "0", 10));
@@ -293,14 +318,14 @@ export async function getUsageDashboardData(
     return a.name.localeCompare(b.name);
   });
 
-  // 5. Build Event Stream & Cursor Pagination
+  // 6. Build Event Stream & Cursor Pagination with tenant-isolated API key metadata
   const hasMore = eventsQueryRes.length > PAGE_SIZE;
   const pageRows = hasMore ? eventsQueryRes.slice(0, PAGE_SIZE) : eventsQueryRes;
 
   const events: UsageEventDto[] = pageRows.map((row) => ({
     id: row.id,
     createdAt: row.createdAt.toISOString(),
-    apiKeyId: row.apiKeyId,
+    apiKeyId: row.resolvedApiKeyId ?? null,
     apiKeyName: row.apiKeyName || "Unknown Key",
     keyPrefix: row.keyPrefix || "img_live_unknown",
     maskedKey: row.keyPrefix ? `${row.keyPrefix}••••••••` : "img_live_••••••••",
@@ -321,7 +346,7 @@ export async function getUsageDashboardData(
     hasMore,
   };
 
-  // 6. Build Filter Options
+  // 7. Build Filter Options
   const apiKeyOptions = orgKeysRes.map((k) => ({
     id: k.id,
     name: k.name,
@@ -353,7 +378,7 @@ export async function getUsageDashboardData(
     eventsPage,
     filterOptions,
     activeFilters,
-    filterError,
+    filterError: null,
   };
 }
 
