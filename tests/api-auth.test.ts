@@ -16,29 +16,31 @@ import { authenticateApiRequest } from "@/lib/api/auth";
 import { verifyApiKey, ApiKeyServiceError } from "@/lib/services/api-keys";
 import { ApiError } from "@/lib/api/errors";
 
-describe("API Request Authentication Helper Unit Tests", () => {
+describe("API Request Authentication Helper Unit Tests (Indistinguishable 401s)", () => {
   const reqId = "req-1234-abcd";
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("throws 401 UNAUTHORIZED when Authorization header is missing", async () => {
+  it("throws uniform 401 UNAUTHORIZED when Authorization header is missing", async () => {
     const req = new Request("http://localhost:3000/v1/images/transform", {
       method: "POST",
     });
 
-    await expect(authenticateApiRequest(req, reqId)).rejects.toThrow(ApiError);
     try {
       await authenticateApiRequest(req, reqId);
+      expect.fail("Should have thrown");
     } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
       expect(err.statusCode).toBe(401);
       expect(err.code).toBe("UNAUTHORIZED");
+      expect(err.message).toBe("Invalid API credentials.");
       expect(err.requestId).toBe(reqId);
     }
   });
 
-  it("throws 401 UNAUTHORIZED when Authorization header does not start with 'Bearer '", async () => {
+  it("throws uniform 401 UNAUTHORIZED when Authorization header scheme is not Bearer", async () => {
     const req = new Request("http://localhost:3000/v1/images/transform", {
       method: "POST",
       headers: { Authorization: "Basic dXNlcjpwYXNz" },
@@ -50,10 +52,11 @@ describe("API Request Authentication Helper Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(401);
       expect(err.code).toBe("UNAUTHORIZED");
+      expect(err.message).toBe("Invalid API credentials.");
     }
   });
 
-  it("throws 401 UNAUTHORIZED when Bearer token is empty", async () => {
+  it("throws uniform 401 UNAUTHORIZED when Bearer token is empty", async () => {
     const req = new Request("http://localhost:3000/v1/images/transform", {
       method: "POST",
       headers: { Authorization: "Bearer   " },
@@ -65,6 +68,7 @@ describe("API Request Authentication Helper Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(401);
       expect(err.code).toBe("UNAUTHORIZED");
+      expect(err.message).toBe("Invalid API credentials.");
     }
   });
 
@@ -86,27 +90,103 @@ describe("API Request Authentication Helper Unit Tests", () => {
     expect(verifyApiKey).toHaveBeenCalledWith("img_live_validkey12345", "image:transform");
   });
 
-  it("maps ApiKeyServiceError UNAUTHORIZED to 401 UNAUTHORIZED", async () => {
-    vi.mocked(verifyApiKey).mockRejectedValueOnce(
-      new ApiKeyServiceError("UNAUTHORIZED", "Invalid API key.")
-    );
+  it("proves all authentication rejection bodies are completely indistinguishable (excluding requestId)", async () => {
+    const rejectionScenarios: { name: string; request: Request; setupMock?: () => void }[] = [
+      {
+        name: "Missing header",
+        request: new Request("http://localhost:3000/v1/images/transform", { method: "POST" }),
+      },
+      {
+        name: "Wrong scheme",
+        request: new Request("http://localhost:3000/v1/images/transform", {
+          method: "POST",
+          headers: { Authorization: "Token img_live_12345" },
+        }),
+      },
+      {
+        name: "Empty token",
+        request: new Request("http://localhost:3000/v1/images/transform", {
+          method: "POST",
+          headers: { Authorization: "Bearer " },
+        }),
+      },
+      {
+        name: "Unknown key",
+        request: new Request("http://localhost:3000/v1/images/transform", {
+          method: "POST",
+          headers: { Authorization: "Bearer img_live_unknownkey123" },
+        }),
+        setupMock: () =>
+          vi.mocked(verifyApiKey).mockRejectedValueOnce(
+            new ApiKeyServiceError("UNAUTHORIZED", "API key not found.")
+          ),
+      },
+      {
+        name: "Revoked key",
+        request: new Request("http://localhost:3000/v1/images/transform", {
+          method: "POST",
+          headers: { Authorization: "Bearer img_live_revokedkey123" },
+        }),
+        setupMock: () =>
+          vi.mocked(verifyApiKey).mockRejectedValueOnce(
+            new ApiKeyServiceError("UNAUTHORIZED", "API key has been revoked.")
+          ),
+      },
+      {
+        name: "Expired key",
+        request: new Request("http://localhost:3000/v1/images/transform", {
+          method: "POST",
+          headers: { Authorization: "Bearer img_live_expiredkey123" },
+        }),
+        setupMock: () =>
+          vi.mocked(verifyApiKey).mockRejectedValueOnce(
+            new ApiKeyServiceError("UNAUTHORIZED", "API key has expired.")
+          ),
+      },
+      {
+        name: "Scope mismatch",
+        request: new Request("http://localhost:3000/v1/images/transform", {
+          method: "POST",
+          headers: { Authorization: "Bearer img_live_noscopekey123" },
+        }),
+        setupMock: () =>
+          vi.mocked(verifyApiKey).mockRejectedValueOnce(
+            new ApiKeyServiceError("UNAUTHORIZED", "API key missing required scope: image:transform")
+          ),
+      },
+    ];
 
-    const req = new Request("http://localhost:3000/v1/images/transform", {
-      method: "POST",
-      headers: { Authorization: "Bearer img_live_invalidkey" },
-    });
+    const results: { statusCode: number; code: string; message: string }[] = [];
 
-    try {
-      await authenticateApiRequest(req, reqId);
-      expect.fail("Should have thrown");
-    } catch (err: any) {
-      expect(err.statusCode).toBe(401);
-      expect(err.code).toBe("UNAUTHORIZED");
+    for (const scenario of rejectionScenarios) {
+      if (scenario.setupMock) scenario.setupMock();
+      try {
+        await authenticateApiRequest(scenario.request, reqId);
+        expect.fail(`Scenario '${scenario.name}' should have rejected`);
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        results.push({
+          statusCode: err.statusCode,
+          code: err.code,
+          message: err.message,
+        });
+      }
+    }
+
+    expect(results.length).toBe(rejectionScenarios.length);
+    const expected = {
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+      message: "Invalid API credentials.",
+    };
+
+    for (const res of results) {
+      expect(res).toEqual(expected);
     }
   });
 
-  it("maps unexpected database error to 503 AUTHENTICATION_UNAVAILABLE", async () => {
-    vi.mocked(verifyApiKey).mockRejectedValueOnce(new Error("Connection timeout to Neon DB"));
+  it("maps unexpected database error to 503 AUTHENTICATION_UNAVAILABLE without leaking connection details", async () => {
+    vi.mocked(verifyApiKey).mockRejectedValueOnce(new Error("Neon connection timeout / password error"));
 
     const req = new Request("http://localhost:3000/v1/images/transform", {
       method: "POST",
@@ -119,7 +199,9 @@ describe("API Request Authentication Helper Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(503);
       expect(err.code).toBe("AUTHENTICATION_UNAVAILABLE");
-      expect(err.message).not.toContain("Neon DB");
+      expect(err.message).toBe("Authentication service temporarily unavailable. Please try again later.");
+      expect(err.message).not.toContain("Neon");
+      expect(err.message).not.toContain("timeout");
     }
   });
 });

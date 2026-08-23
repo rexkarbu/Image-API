@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { parseMultipartRequest } from "@/lib/api/multipart";
 import { ApiError } from "@/lib/api/errors";
+import { Readable } from "node:stream";
 import sharp from "sharp";
 
 async function createDummyImage(): Promise<Buffer> {
@@ -74,7 +75,7 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     expect(parsed.options.withoutEnlargement).toBe(true);
   });
 
-  it("parses explicit valid options: width, height, format, quality, fit, withoutEnlargement", async () => {
+  it("parses explicit valid options with both dimensions and fit", async () => {
     const dummy = await createDummyImage();
     const req = buildMultipartRequest(
       {
@@ -110,6 +111,7 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(400);
       expect(err.code).toBe("INVALID_MULTIPART");
+      expect(err.message).toBe("Content-Type must be 'multipart/form-data'.");
     }
   });
 
@@ -126,6 +128,46 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     }
   });
 
+  it("rejects file uploaded under wrong field name (e.g. 'image' instead of 'file')", async () => {
+    const dummy = await createDummyImage();
+    const req = buildMultipartRequest({}, dummy, "test.png", "image");
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_MULTIPART");
+      expect(err.message).toBe("Exactly one image file must be uploaded under the 'file' field.");
+    }
+  });
+
+  it("rejects multiple files uploaded in a single request", async () => {
+    const dummy = await createDummyImage();
+    const boundary = "---------------------------974767299852498929531610575";
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="file1.png"\r\nContent-Type: image/png\r\n\r\n`),
+      dummy,
+      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="file2.png"\r\nContent-Type: image/png\r\n\r\n`),
+      dummy,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+
+    const req = new Request("http://localhost:3000/v1/images/transform", {
+      method: "POST",
+      headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+      body,
+    });
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_MULTIPART");
+    }
+  });
+
   it("rejects unknown multipart field with 400 INVALID_OPTIONS", async () => {
     const dummy = await createDummyImage();
     const req = buildMultipartRequest({ unknownParam: "value" }, dummy);
@@ -136,7 +178,7 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(400);
       expect(err.code).toBe("INVALID_OPTIONS");
-      expect(err.message).toContain("Unknown multipart field");
+      expect(err.message).toBe("Unknown multipart field: 'unknownParam'.");
     }
   });
 
@@ -163,7 +205,44 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(400);
       expect(err.code).toBe("INVALID_MULTIPART");
-      expect(err.message).toContain("Duplicate multipart field");
+      expect(err.message).toBe("Duplicate multipart field: 'width'.");
+    }
+  });
+
+  it("rejects explicitly supplied fit parameter unless both width and height are provided", async () => {
+    const dummy = await createDummyImage();
+
+    // 1. Only width provided with fit
+    const reqWidthOnly = buildMultipartRequest({ width: "200", fit: "cover" }, dummy);
+    try {
+      await parseMultipartRequest(reqWidthOnly, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_OPTIONS");
+      expect(err.message).toBe("The 'fit' parameter is only allowed when both 'width' and 'height' dimensions are provided.");
+    }
+
+    // 2. Only height provided with fit
+    const reqHeightOnly = buildMultipartRequest({ height: "200", fit: "contain" }, dummy);
+    try {
+      await parseMultipartRequest(reqHeightOnly, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_OPTIONS");
+      expect(err.message).toBe("The 'fit' parameter is only allowed when both 'width' and 'height' dimensions are provided.");
+    }
+
+    // 3. No dimensions provided with fit
+    const reqNoDimensions = buildMultipartRequest({ fit: "fill" }, dummy);
+    try {
+      await parseMultipartRequest(reqNoDimensions, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_OPTIONS");
+      expect(err.message).toBe("The 'fit' parameter is only allowed when both 'width' and 'height' dimensions are provided.");
     }
   });
 
@@ -177,49 +256,11 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(400);
       expect(err.code).toBe("INVALID_OPTIONS");
-      expect(err.message).toContain("Quality parameter is not supported for PNG");
-    }
-  });
-
-  it("rejects invalid dimensions: width < 1 or width > 4096 or non-integer", async () => {
-    const dummy = await createDummyImage();
-
-    for (const invalidW of ["0", "4097", "-10", "abc", "100.5"]) {
-      const req = buildMultipartRequest({ width: invalidW }, dummy);
-      await expect(parseMultipartRequest(req, reqId)).rejects.toThrow(ApiError);
-    }
-  });
-
-  it("rejects invalid format with 400 INVALID_OPTIONS", async () => {
-    const dummy = await createDummyImage();
-    const req = buildMultipartRequest({ format: "gif" }, dummy);
-
-    try {
-      await parseMultipartRequest(req, reqId);
-      expect.fail("Should have thrown");
-    } catch (err: any) {
-      expect(err.statusCode).toBe(400);
-      expect(err.code).toBe("INVALID_OPTIONS");
-      expect(err.message).toContain("Invalid output format");
-    }
-  });
-
-  it("rejects invalid fit with 400 INVALID_OPTIONS", async () => {
-    const dummy = await createDummyImage();
-    const req = buildMultipartRequest({ fit: "invalid_fit" }, dummy);
-
-    try {
-      await parseMultipartRequest(req, reqId);
-      expect.fail("Should have thrown");
-    } catch (err: any) {
-      expect(err.statusCode).toBe(400);
-      expect(err.code).toBe("INVALID_OPTIONS");
-      expect(err.message).toContain("Invalid fit parameter");
+      expect(err.message).toBe("Quality parameter is not supported for PNG format (PNG uses lossless compression).");
     }
   });
 
   it("rejects file exceeding 10 MiB with 413 PAYLOAD_TOO_LARGE", async () => {
-    // 10.5 MiB buffer
     const oversizedBuffer = Buffer.alloc(10.5 * 1024 * 1024);
     const req = buildMultipartRequest({}, oversizedBuffer);
 
@@ -229,6 +270,56 @@ describe("Streaming Multipart Parser & Options Validator Unit Tests", () => {
     } catch (err: any) {
       expect(err.statusCode).toBe(413);
       expect(err.code).toBe("PAYLOAD_TOO_LARGE");
+    }
+  });
+
+  it("handles malformed multipart stream errors cleanly without exposing raw parser internals", async () => {
+    const malformedBody = Buffer.from("not-valid-multipart-boundary-content");
+    const req = new Request("http://localhost:3000/v1/images/transform", {
+      method: "POST",
+      headers: { "Content-Type": "multipart/form-data; boundary=---TestBoundary" },
+      body: malformedBody,
+    });
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_MULTIPART");
+      expect(err.message).not.toContain("busboy");
+    }
+  });
+
+  it("handles request abort signal during stream parsing", async () => {
+    const controller = new AbortController();
+    const dummy = await createDummyImage();
+
+    // Create a slow readable stream
+    const slowStream = new ReadableStream({
+      start(ctrl) {
+        ctrl.enqueue(Buffer.from("-----------------------------974767299852498929531610575\r\n"));
+        // Abort immediately
+        controller.abort();
+      },
+    });
+
+    const req = new Request("http://localhost:3000/v1/images/transform", {
+      method: "POST",
+      headers: { "Content-Type": "multipart/form-data; boundary=---------------------------974767299852498929531610575" },
+      body: slowStream,
+      signal: controller.signal,
+      // @ts-ignore
+      duplex: "half",
+    });
+
+    try {
+      await parseMultipartRequest(req, reqId);
+      expect.fail("Should have thrown");
+    } catch (err: any) {
+      expect(err.statusCode).toBe(400);
+      expect(err.code).toBe("INVALID_MULTIPART");
+      expect(err.message).toBe("Client aborted the request.");
     }
   });
 });

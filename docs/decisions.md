@@ -53,14 +53,16 @@
     - Append-only audit: The `api_key_audit_events` table tracks all lifecycle transitions (`created`, `revoked`, `rotation_created`, `expiration_scheduled`) without recording plaintext keys or hashes.
     - Throttled activity timestamps: `last_used_at` updates are throttled to at most once per 5 minutes to prevent write amplification.
 
-13. **Image Transformation Sandboxing, Encoding, and Memory Policy (Milestone 2)**
-    - Image decoding is isolated on the Node.js runtime using `sharp` configured with memory and pixel limits (`failOn: "warning"`, `limitInputPixels: 40_000_000`, `pages: 1`, `animated: false`).
-    - Gated input formats: Only `jpeg`, `png`, `webp` are accepted. Multi-page, animated, SVG, and vector documents are rejected to eliminate SSRF and XML entity attack surfaces.
+13. **Image Transformation Sandboxing, Encoding, and Memory Policy (Milestone 2 & M2.1)**
+    - Image decoding is isolated on the Node.js runtime using `sharp` configured with memory, pixel, and channel limits (`failOn: "warning"`, `limitInputPixels: 40_000_000`, `limitInputChannels: 4`, `pages: 1`, `animated: false`, `.timeout({ seconds: 20 })`).
+    - Gated input formats: Only `jpeg`, `png`, `webp` are accepted. Multi-page, animated, SVG, AVIF input, and vector documents are rejected to eliminate SSRF and XML entity attack surfaces.
     - Metadata stripping: All EXIF, GPS, XMP, and IPTC metadata are stripped by default on all outputs. Auto-orientation (`.rotate()`) is applied prior to metadata removal.
     - PNG quality handling: PNG uses lossless compression; explicitly supplying a `quality` parameter for PNG output is rejected with `400 INVALID_OPTIONS` rather than pretending lossy compression applies.
+    - Fit parameter validation: Supplying `fit` requires both `width` and `height` dimensions to prevent ambiguous resizing behavior.
     - Transparent JPEG flattening: Converting transparent PNG or WebP images to JPEG automatically flattens alpha channels against solid white.
 
-14. **Idempotent Request-Path Usage Metering (Milestone 2)**
+14. **Idempotent Request-Path Usage Metering & Indistinguishable Authentication (Milestone 2 & M2.1)**
+    - Authentication failure indistinguishability: All authentication failures (missing, invalid, revoked, expired, or scope mismatch) return identical HTTP 401 UNAUTHORIZED responses with the fixed generic message `Invalid API credentials.` to prevent credential enumeration.
     - Idempotency keys are mandatory for all transformation requests (16-128 printable ASCII characters).
     - Request IDs in `usage_events` are derived as `SHA-256(organizationId + "\0" + rawIdempotencyKey)`, guaranteeing that raw client idempotency keys are never persisted or exposed in database records or logs.
     - Usage events are inserted atomically with `ON CONFLICT (request_id) DO NOTHING`. Losing duplicate requests immediately receive `409 DUPLICATE_REQUEST` without recording additional units.

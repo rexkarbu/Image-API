@@ -200,25 +200,98 @@ async function verifyDbMetadata() {
     `);
 
     console.log("\n4. Check Constraints:");
-    const requiredChecks = [
-      { table: "usage_events", pattern: "units = 1", name: "usage_events_units_equals_one" },
-      { table: "usage_events", pattern: "[0-9a-f]{64}", name: "usage_events_request_id_format" },
-      { table: "usage_events", pattern: "status_code", name: "usage_events_status_code_2xx" },
-      { table: "api_key_audit_events", pattern: "created", name: "api_key_audit_events_type_check" },
-      { table: "api_keys", pattern: "active", name: "api_keys_status_check" },
-      { table: "api_keys", pattern: "[0-9a-f]{64}", name: "api_keys_key_hash_format" },
-      { table: "api_keys", pattern: "img_live_", name: "api_keys_key_prefix_format" },
-      { table: "api_keys", pattern: "revoked_at", name: "api_keys_status_revoked_consistency" },
-      { table: "api_keys", pattern: "image:transform", name: "api_keys_scopes_check" },
-      { table: "api_keys", pattern: "expires_at", name: "api_keys_expires_at_check" },
+    const requiredChecks: {
+      table: string;
+      name: string;
+      validate: (clause: string) => boolean;
+      description: string;
+    }[] = [
+      {
+        table: "usage_events",
+        name: "usage_events_units_equals_one",
+        validate: (c) => c.includes("units = 1"),
+        description: "units = 1",
+      },
+      {
+        table: "usage_events",
+        name: "usage_events_request_id_format",
+        validate: (c) => c.includes("^[0-9a-f]{64}$"),
+        description: "request_id ~ '^[0-9a-f]{64}$'",
+      },
+      {
+        table: "usage_events",
+        name: "usage_events_status_code_2xx",
+        validate: (c) =>
+          c.includes("status_code >= 200") &&
+          c.includes("status_code <= 299"),
+        description: "status_code >= 200 AND status_code <= 299",
+      },
+      {
+        table: "api_key_audit_events",
+        name: "api_key_audit_events_type_check",
+        validate: (c) =>
+          c.includes("created") &&
+          c.includes("revoked") &&
+          c.includes("rotation_created") &&
+          c.includes("expiration_scheduled"),
+        description: "event_type IN ('created', 'revoked', 'rotation_created', 'expiration_scheduled')",
+      },
+      {
+        table: "api_keys",
+        name: "api_keys_status_check",
+        validate: (c) => c.includes("active") && c.includes("revoked"),
+        description: "status IN ('active', 'revoked')",
+      },
+      {
+        table: "api_keys",
+        name: "api_keys_key_hash_format",
+        validate: (c) => c.includes("^[0-9a-f]{64}$"),
+        description: "key_hash ~ '^[0-9a-f]{64}$'",
+      },
+      {
+        table: "api_keys",
+        name: "api_keys_key_prefix_format",
+        validate: (c) => c.includes("^img_live_[A-Za-z0-9_-]{8}$"),
+        description: "key_prefix ~ '^img_live_[A-Za-z0-9_-]{8}$'",
+      },
+      {
+        table: "api_keys",
+        name: "api_keys_status_revoked_consistency",
+        validate: (c) =>
+          c.includes("status = 'active'") &&
+          c.includes("revoked_at IS NULL") &&
+          c.includes("status = 'revoked'") &&
+          c.includes("revoked_at IS NOT NULL"),
+        description: "(status = 'active' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)",
+      },
+      {
+        table: "api_keys",
+        name: "api_keys_scopes_check",
+        validate: (c) => c.includes("image:transform"),
+        description: "scopes = 'image:transform'",
+      },
+      {
+        table: "api_keys",
+        name: "api_keys_expires_at_check",
+        validate: (c) => c.includes("expires_at IS NULL") || c.includes("expires_at > created_at"),
+        description: "expires_at IS NULL OR expires_at > created_at",
+      },
     ];
 
     for (const check of requiredChecks) {
       const match = checksRes.rows.find(
-        (r) => r.table_name === check.table && r.check_clause.includes(check.pattern)
+        (r) => r.table_name === check.table && r.constraint_name === check.name
       );
       if (!match) {
-        throw new Error(`Metadata Assertion Failed: Missing check constraint matching '${check.pattern}' on ${check.table}.`);
+        throw new Error(
+          `Metadata Assertion Failed: Missing exact check constraint '${check.name}' on table '${check.table}'.`
+        );
+      }
+      const normalizedClause = match.check_clause.replace(/::text/g, "").replace(/\s+/g, " ");
+      if (!check.validate(normalizedClause)) {
+        throw new Error(
+          `Metadata Assertion Failed: Check constraint '${check.name}' failed semantic validation. Expected '${check.description}', got '${match.check_clause}'`
+        );
       }
       console.log(`   - ${match.table_name}: ${match.constraint_name} -> ${match.check_clause}`);
     }

@@ -52,7 +52,10 @@ export function createErrorResponse(
     );
   }
 
-  // Generic fallback for unhandled exceptions (never leak internal details)
+  // Server-side logging of unhandled exception with sanitized operation metadata only
+  console.error(`[Unhandled Route Error] operation=POST /v1/images/transform correlationId=${requestId}`);
+
+  // Generic fallback for unhandled exceptions (never leak internal details or stack traces)
   return NextResponse.json(
     {
       error: {

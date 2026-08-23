@@ -1,3 +1,5 @@
+import "server-only";
+
 import busboy from "busboy";
 import { Readable } from "node:stream";
 import { ApiError } from "./errors";
@@ -25,9 +27,12 @@ const ALLOWED_FIELDS = new Set(["width", "height", "format", "quality", "fit", "
 const ALLOWED_FORMATS = new Set<OutputFormat>(["jpeg", "png", "webp", "avif"]);
 const ALLOWED_FITS = new Set<ImageFit>(["cover", "contain", "inside", "fill"]);
 
+const GENERIC_MULTIPART_ERROR = "Malformed multipart request payload.";
+
 /**
  * Parses and validates a streaming multipart/form-data request using Busboy.
- * Enforces file size limits, field count limits, and strict schema validation.
+ * Enforces file size limits, field count limits, single-promise settlement, stream cleanup,
+ * and strict options schema validation.
  */
 export async function parseMultipartRequest(
   request: Request,
@@ -51,7 +56,7 @@ export async function parseMultipartRequest(
       throw new ApiError(
         413,
         "PAYLOAD_TOO_LARGE",
-        `Uploaded payload exceeds maximum allowed size of 10 MiB.`,
+        "Uploaded payload exceeds maximum allowed size of 10 MiB.",
         requestId
       );
     }
@@ -67,7 +72,54 @@ export async function parseMultipartRequest(
   }
 
   return new Promise<ParsedMultipartPayload>((resolve, reject) => {
-    let bb: busboy.Busboy;
+    let settled = false;
+    let nodeReadable: Readable | null = null;
+    let bb: busboy.Busboy | null = null;
+
+    const cleanup = () => {
+      if (nodeReadable) {
+        try {
+          if (bb) nodeReadable.unpipe(bb);
+          nodeReadable.destroy();
+        } catch {}
+      }
+      if (bb) {
+        try {
+          bb.removeAllListeners();
+          bb.on("error", () => {});
+        } catch {}
+      }
+    };
+
+    const fail = (err: ApiError) => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(err);
+      }
+    };
+
+    const succeed = (payload: ParsedMultipartPayload) => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        resolve(payload);
+      }
+    };
+
+    // Check early abort
+    if (request.signal?.aborted) {
+      return fail(new ApiError(400, "INVALID_MULTIPART", "Client aborted the request.", requestId));
+    }
+
+    const abortHandler = () => {
+      fail(new ApiError(400, "INVALID_MULTIPART", "Client aborted the request.", requestId));
+    };
+
+    if (request.signal) {
+      request.signal.addEventListener("abort", abortHandler, { once: true });
+    }
+
     try {
       bb = busboy({
         headers: { "content-type": contentType },
@@ -75,12 +127,12 @@ export async function parseMultipartRequest(
           fileSize: MAX_FILE_SIZE,
           files: 1,
           fields: 6,
-          parts: 10,
+          parts: 8,
           fieldSize: 1024,
         },
       });
     } catch {
-      return reject(
+      return fail(
         new ApiError(400, "INVALID_MULTIPART", "Malformed multipart boundary or headers.", requestId)
       );
     }
@@ -92,15 +144,7 @@ export async function parseMultipartRequest(
     const rawFields: Record<string, string> = {};
     const seenFields = new Set<string>();
 
-    let hasError = false;
-    const fail = (err: ApiError) => {
-      if (!hasError) {
-        hasError = true;
-        reject(err);
-      }
-    };
-
-    bb.on("file", (fieldname, stream, info) => {
+    bb.on("file", (fieldname, stream) => {
       if (fieldname !== "file" || fileFound) {
         stream.resume(); // Discard stream
         return fail(
@@ -129,7 +173,7 @@ export async function parseMultipartRequest(
       });
 
       stream.on("error", () => {
-        fail(new ApiError(400, "INVALID_MULTIPART", "Error reading uploaded file stream.", requestId));
+        fail(new ApiError(400, "INVALID_MULTIPART", GENERIC_MULTIPART_ERROR, requestId));
       });
     });
 
@@ -193,19 +237,19 @@ export async function parseMultipartRequest(
       );
     });
 
-    bb.on("error", (err) => {
+    bb.on("error", () => {
       fail(
         new ApiError(
           400,
           "INVALID_MULTIPART",
-          `Malformed multipart data: ${(err as Error).message || "parsing error"}`,
+          GENERIC_MULTIPART_ERROR,
           requestId
         )
       );
     });
 
     bb.on("finish", () => {
-      if (hasError) return;
+      if (settled) return;
 
       if (!fileFound || fileChunks.length === 0) {
         return fail(
@@ -223,7 +267,7 @@ export async function parseMultipartRequest(
           new ApiError(
             413,
             "PAYLOAD_TOO_LARGE",
-            `Uploaded image exceeds maximum allowed size of 10 MiB.`,
+            "Uploaded image exceeds maximum allowed size of 10 MiB.",
             requestId
           )
         );
@@ -233,28 +277,21 @@ export async function parseMultipartRequest(
       try {
         const options = parseAndValidateOptions(rawFields, requestId);
         const fileBuffer = Buffer.concat(fileChunks);
-        resolve({ fileBuffer, options });
+        succeed({ fileBuffer, options });
       } catch (err) {
         fail(err as ApiError);
       }
     });
 
-    // Handle abort signal
-    if (request.signal) {
-      if (request.signal.aborted) {
-        return fail(new ApiError(400, "INVALID_MULTIPART", "Client aborted the request.", requestId));
-      }
-      request.signal.addEventListener("abort", () => {
-        fail(new ApiError(400, "INVALID_MULTIPART", "Client aborted the request.", requestId));
-      });
-    }
-
     // Pipe the web ReadableStream into Node busboy
     try {
-      const nodeReadable = Readable.fromWeb(request.body as import("stream/web").ReadableStream);
+      nodeReadable = Readable.fromWeb(request.body as import("stream/web").ReadableStream);
+      nodeReadable.on("error", () => {
+        fail(new ApiError(400, "INVALID_MULTIPART", GENERIC_MULTIPART_ERROR, requestId));
+      });
       nodeReadable.pipe(bb);
     } catch {
-      fail(new ApiError(400, "INVALID_MULTIPART", "Failed to initialize request stream.", requestId));
+      fail(new ApiError(400, "INVALID_MULTIPART", GENERIC_MULTIPART_ERROR, requestId));
     }
   });
 }
@@ -332,8 +369,17 @@ function parseAndValidateOptions(
     quality = numQ;
   }
 
-  // 5. Fit validation
+  // 5. Fit validation: only valid when BOTH width and height are provided
   if (fields.fit !== undefined) {
+    if (fields.width === undefined || fields.height === undefined) {
+      throw new ApiError(
+        400,
+        "INVALID_OPTIONS",
+        "The 'fit' parameter is only allowed when both 'width' and 'height' dimensions are provided.",
+        requestId
+      );
+    }
+
     const rawFit = fields.fit.trim().toLowerCase() as ImageFit;
     if (!ALLOWED_FITS.has(rawFit)) {
       throw new ApiError(

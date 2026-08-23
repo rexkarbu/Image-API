@@ -1,6 +1,4 @@
-import "server-only";
-
-import sharp, { type Metadata } from "sharp";
+import sharp, { type Metadata, type SharpOptions } from "sharp";
 import { ImageTransformOptions, OutputFormat } from "@/lib/api/multipart";
 import { ApiError } from "@/lib/api/errors";
 
@@ -13,6 +11,15 @@ export interface TransformResult {
   sizeBytes: number;
 }
 
+export const SHARP_SECURITY_OPTIONS: SharpOptions = {
+  failOn: "warning",
+  limitInputPixels: 40_000_000,
+  limitInputChannels: 4,
+  pages: 1,
+  animated: false,
+};
+
+export const SHARP_TIMEOUT_SECONDS = 20;
 const MAX_OUTPUT_SIZE = 20 * 1024 * 1024; // 20 MiB
 const ALLOWED_INPUT_FORMATS = new Set(["jpeg", "png", "webp"]);
 
@@ -25,23 +32,18 @@ const CONTENT_TYPES: Record<OutputFormat, string> = {
 
 /**
  * Transforms an untrusted image buffer using Sharp with strict security sandboxing.
- * Strips all metadata, applies auto-orientation, resizes within boundaries, and converts to target format.
+ * Strips all metadata, applies auto-orientation, resizes within boundaries, enforces 20s timeout,
+ * and converts to target format with sanitized public error mapping.
  */
 export async function transformImage(
   inputBuffer: Buffer,
   options: ImageTransformOptions,
   requestId: string
 ): Promise<TransformResult> {
-  // 1. Initial metadata inspection & format gating
+  // 1. Initial metadata inspection & format gating with shared security options
   let metadata: Metadata;
   try {
-    const probe = sharp(inputBuffer, {
-      failOn: "warning",
-      limitInputPixels: 40_000_000,
-      unlimited: false,
-      animated: false,
-      pages: 1,
-    });
+    const probe = sharp(inputBuffer, SHARP_SECURITY_OPTIONS);
     metadata = await probe.metadata();
   } catch {
     throw new ApiError(
@@ -73,13 +75,8 @@ export async function transformImage(
 
   // 2. Build secure Sharp transformation pipeline
   try {
-    let pipeline = sharp(inputBuffer, {
-      failOn: "warning",
-      limitInputPixels: 40_000_000,
-      unlimited: false,
-      animated: false,
-      pages: 1,
-    });
+    let pipeline = sharp(inputBuffer, SHARP_SECURITY_OPTIONS)
+      .timeout({ seconds: SHARP_TIMEOUT_SECONDS });
 
     // Auto-orient based on EXIF before stripping metadata / resizing
     pipeline = pipeline.rotate();
@@ -94,8 +91,8 @@ export async function transformImage(
       });
     }
 
-    // If converting to JPEG, flatten transparent backgrounds against solid white
-    if (options.format === "jpeg" && (metadata.hasAlpha || metadata.channels === 4)) {
+    // For JPEG output, always flatten alpha/padding against solid white
+    if (options.format === "jpeg") {
       pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
     }
 
@@ -160,8 +157,8 @@ export async function transformImage(
   } catch (err) {
     if (err instanceof ApiError) throw err;
 
-    // Log internally without leaking to client
-    console.error(`[Sharp Processing Error] requestId=${requestId}`);
+    // Log internally with only operation and correlation ID without leaking libvips error strings
+    console.error(`[Image Processing Error] operation=transformImage correlationId=${requestId}`);
     throw new ApiError(
       422,
       "UNPROCESSABLE_IMAGE",

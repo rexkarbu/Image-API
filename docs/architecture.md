@@ -88,19 +88,20 @@
 
 ### Endpoint Contract (`POST /v1/images/transform`)
 - **Runtime**: Explicitly declared as `runtime = "nodejs"`, `dynamic = "force-dynamic"`, `maxDuration = 30`.
-- **Authentication**: Server-only helper `authenticateApiRequest` verifies the Bearer API key against the database, returning indistinguishable 401 UNAUTHORIZED responses on any invalid, expired, or revoked key.
+- **Authentication**: Server-only helper `authenticateApiRequest` verifies the Bearer API key against the database, returning strictly indistinguishable `401 UNAUTHORIZED` responses with the uniform message `Invalid API credentials.` on all invalid, missing, expired, or revoked keys.
 - **Idempotency & Request Isolation**:
   - `Idempotency-Key` header is required (16-128 printable ASCII characters without control characters or whitespace).
   - A tenant-namespaced 64-character SHA-256 digest is derived: `SHA-256(organizationId + "\0" + rawIdempotencyKey)`.
   - The raw user idempotency key is never persisted or logged.
 - **Streaming Multipart Parser**:
-  - Uses `busboy` on incoming request streams without writing temporary files to disk.
-  - Limits: max file size `10 MiB`, max fields `6`, max parts `10`, max field size `1024` bytes.
+  - Uses `busboy` on incoming request streams with zero temporary disk writes and explicit stream listener lifecycle cleanup.
+  - Limits: max file size `10 MiB`, max fields `6`, max parts `7`, max field size `1024` bytes.
   - Validates options and rejects unknown/duplicate fields.
+  - An explicitly supplied `fit` parameter is rejected with `400 INVALID_OPTIONS` unless both `width` and `height` dimensions are provided.
   - Rejects explicit `quality` parameter when `format = "png"` (PNG uses lossless compression).
 - **Sharp Processing Sandboxing**:
-  - Configured with `failOn: "warning"`, `limitInputPixels: 40_000_000`, `unlimited: false`, `pages: 1`, `animated: false`.
-  - Allowed input formats: `jpeg`, `png`, `webp` (rejects SVG, GIF, TIFF, PDF, animated WebP).
+  - Configured with `failOn: "warning"`, `limitInputPixels: 40_000_000`, `limitInputChannels: 4`, `pages: 1`, `animated: false`, and a 20-second timeout (`.timeout({ seconds: 20 })`).
+  - Allowed input formats: `jpeg`, `png`, `webp` (rejects SVG, GIF, TIFF, PDF, AVIF, and animated WebP).
   - Automatically strips all EXIF, GPS, XMP, and IPTC metadata.
   - Auto-orients based on EXIF (`.rotate()`) prior to resizing.
   - Flattens transparent alpha channels over solid white when converting to JPEG.

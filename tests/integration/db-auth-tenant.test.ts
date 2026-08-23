@@ -789,20 +789,46 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
       createTransformRequest("img_live_invalidkey123456789012345678901234567890", `idemp-${crypto.randomUUID()}`, {}, testImage)
     );
     expect(resInvalid.status).toBe(401);
+    const bodyInvalid = await resInvalid.json();
+    expect(bodyInvalid.error.message).toBe("Invalid API credentials.");
 
-    // 2. Revoked Key
+    // 3. Revoked Key
     await revokeApiKey(context, keyRes.key.id);
     const resRevoked = await transformRoute(
       createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, testImage)
     );
     expect(resRevoked.status).toBe(401);
+    const bodyRevoked = await resRevoked.json();
+    expect(bodyRevoked.error.message).toBe("Invalid API credentials.");
 
-    // Confirm 0 usage rows created
-    const rows = await db.select().from(usageEvents).where(eq(usageEvents.apiKeyId, keyRes.key.id));
+    // 4. Expired Key
+    const expiredKeyRes = await createApiKey(context, { name: "Expired Test Key", scopes: "image:transform" });
+    createdKeyIds.push(expiredKeyRes.key.id);
+    // Set created_at to 2 hours ago and expires_at to 1 hour ago
+    await db
+      .update(apiKeys)
+      .set({
+        createdAt: new Date(Date.now() - 7200 * 1000),
+        expiresAt: new Date(Date.now() - 3600 * 1000),
+      })
+      .where(eq(apiKeys.id, expiredKeyRes.key.id));
+
+    const resExpired = await transformRoute(
+      createTransformRequest(expiredKeyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, testImage)
+    );
+    expect(resExpired.status).toBe(401);
+    const bodyExpired = await resExpired.json();
+    expect(bodyExpired.error.message).toBe("Invalid API credentials.");
+
+    // Confirm 0 usage rows created for both keys
+    const rows = await db
+      .select()
+      .from(usageEvents)
+      .where(inArray(usageEvents.apiKeyId, [keyRes.key.id, expiredKeyRes.key.id]));
     expect(rows.length).toBe(0);
   });
 
-  it("ensures zero usage_events are recorded on invalid options or unsupported input", async () => {
+  it("ensures zero usage_events are recorded on invalid options, fit violations, oversized payload, or unsupported input", async () => {
     const context = { organizationId: orgAId, userId: userAId, role: "owner" };
     const keyRes = await createApiKey(context, { name: "Key For Bad Requests", scopes: "image:transform" });
     createdKeyIds.push(keyRes.key.id);
@@ -815,19 +841,32 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
     );
     expect(resBadOptions.status).toBe(400);
 
-    // 2. Unsupported format: Valid SVG (detected as SVG -> 415)
+    // 2. Fit specified without both dimensions (only width)
+    const resBadFit = await transformRoute(
+      createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, { width: "100", fit: "cover" }, testImage)
+    );
+    expect(resBadFit.status).toBe(400);
+
+    // 3. Unsupported format: Valid SVG (detected as SVG -> 415)
     const svgBuffer = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect width="50" height="50" fill="red"/></svg>');
     const resSvg = await transformRoute(
       createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, svgBuffer)
     );
     expect(resSvg.status).toBe(415);
 
-    // 3. Corrupt image bytes (422 UNPROCESSABLE_IMAGE)
+    // 4. Corrupt image bytes (422 UNPROCESSABLE_IMAGE)
     const corruptBuffer = Buffer.from("not-an-image-corrupt-data");
     const resCorrupt = await transformRoute(
       createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, corruptBuffer)
     );
     expect(resCorrupt.status).toBe(422);
+
+    // 5. Oversized image payload (>10 MiB) -> 413
+    const bigBuffer = Buffer.alloc(10.5 * 1024 * 1024);
+    const resBig = await transformRoute(
+      createTransformRequest(keyRes.plaintextKey, `idemp-${crypto.randomUUID()}`, {}, bigBuffer)
+    );
+    expect(resBig.status).toBe(413);
 
     // Confirm 0 usage rows created
     const rows = await db.select().from(usageEvents).where(eq(usageEvents.apiKeyId, keyRes.key.id));
@@ -856,4 +895,3 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
     }
   });
 });
-
