@@ -9,11 +9,11 @@ export function SwaggerPortal() {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
     let isCancelled = false;
 
     import("swagger-ui-dist/swagger-ui-bundle").then((module) => {
       if (isCancelled || !containerRef.current) return;
+      setMounted(true);
       const SwaggerUIBundle = module.default || module;
       SwaggerUIBundle({
         domNode: containerRef.current,
