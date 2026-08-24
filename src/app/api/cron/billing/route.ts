@@ -33,27 +33,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       span.setAttribute("http.route", "/api/cron/billing");
 
       const authHeader = request.headers.get("authorization");
-      let cronSecret: string | undefined;
-
-      try {
-        const config = getValidatedStripeConfig();
-        cronSecret = config.cronSecret || process.env.CRON_SECRET;
-      } catch {
-        logger.error("billing.cron_config_unavailable", {
-          requestId,
-          route: "/api/cron/billing",
-          method: "GET",
-          statusCode: 503,
-          durationMs: Date.now() - startTime,
-          outcome: "error",
-          errorCode: "STRIPE_CONFIG_UNAVAILABLE",
-        });
-
-        return NextResponse.json(
-          { error: "Billing service unavailable." },
-          { status: 503, headers: { "X-Request-ID": requestId } }
-        );
-      }
+      const cronSecret = process.env.CRON_SECRET;
 
       if (!cronSecret || !timingSafeSecretMatch(cronSecret, authHeader)) {
         logger.warn("billing.cron_unauthorized", {
@@ -69,6 +49,25 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         return NextResponse.json(
           { error: "Unauthorized." },
           { status: 401, headers: { "X-Request-ID": requestId } }
+        );
+      }
+
+      try {
+        getValidatedStripeConfig({ allowOptionalWebhookSecret: true });
+      } catch {
+        logger.error("billing.cron_config_unavailable", {
+          requestId,
+          route: "/api/cron/billing",
+          method: "GET",
+          statusCode: 503,
+          durationMs: Date.now() - startTime,
+          outcome: "error",
+          errorCode: "STRIPE_CONFIG_UNAVAILABLE",
+        });
+
+        return NextResponse.json(
+          { error: "Billing service unavailable." },
+          { status: 503, headers: { "X-Request-ID": requestId } }
         );
       }
 

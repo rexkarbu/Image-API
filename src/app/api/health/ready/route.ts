@@ -55,9 +55,9 @@ export async function GET(request: Request) {
       const checkResult = await evaluateReadiness(
         {
           pool,
-          redis: createBoundedRedisClient(2000),
+          redis: createBoundedRedisClient(3000),
         },
-        2000
+        3000
       );
 
       const durationMs = Date.now() - startTime;
