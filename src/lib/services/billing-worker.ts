@@ -94,11 +94,12 @@ async function claimUsageBatchForTenant(
   organizationId: string,
   stripeCustomerId: string,
   meteringEnabledAt: Date,
-  client: DbClient
+  client: DbClient,
+  targetWindowEnd?: Date
 ): Promise<BillingUsageBatch | null> {
   const now = new Date();
-  // Reporting window: closed usage up to 1 minute ago to allow in-flight events to land
-  const windowEnd = new Date(now.getTime() - 60 * 1000);
+  // Reporting window: closed usage up to 1 minute ago by default, or caller-specified targetWindowEnd
+  const windowEnd = targetWindowEnd || new Date(now.getTime() - 60 * 1000);
   const windowStart = meteringEnabledAt;
 
   if (windowEnd <= windowStart) {
@@ -246,7 +247,8 @@ async function reportBatchToStripe(
  * Main background billing worker execution routine.
  */
 export async function runBillingWorker(
-  client: DbClient = db
+  client: DbClient = db,
+  options?: { windowEnd?: Date }
 ): Promise<WorkerRunResult> {
   const leaseToken = crypto.randomUUID();
   const acquired = await acquireWorkerLease(leaseToken, client);
@@ -331,7 +333,8 @@ export async function runBillingWorker(
           sub.organizationId,
           sub.stripeCustomerId,
           sub.meteringEnabledAt,
-          client
+          client,
+          options?.windowEnd
         );
 
         if (batch) {
