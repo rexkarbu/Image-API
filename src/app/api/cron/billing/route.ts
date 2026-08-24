@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runBillingWorker } from "@/lib/services/billing-worker";
 import { getValidatedStripeConfig } from "@/lib/stripe/safety";
+import { resolveRequestId, logger } from "@/lib/observability/logger";
+import { withSpan } from "@/lib/observability/tracer";
 import crypto from "node:crypto";
 
 export const runtime = "nodejs";
@@ -21,32 +23,104 @@ function timingSafeSecretMatch(expectedSecret: string, providedAuthHeader: strin
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const authHeader = request.headers.get("authorization");
-  let cronSecret: string | undefined;
+  const startTime = Date.now();
+  const requestId = resolveRequestId(request.headers.get("x-request-id"));
 
-  try {
-    const config = getValidatedStripeConfig();
-    cronSecret = config.cronSecret || process.env.CRON_SECRET;
-  } catch {
-    return NextResponse.json({ error: "Billing service unavailable." }, { status: 503 });
-  }
+  return withSpan(
+    "billing.cron.run",
+    async (span) => {
+      span.setAttribute("http.method", "GET");
+      span.setAttribute("http.route", "/api/cron/billing");
 
-  if (!cronSecret || !timingSafeSecretMatch(cronSecret, authHeader)) {
-    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-  }
+      const authHeader = request.headers.get("authorization");
+      let cronSecret: string | undefined;
 
-  try {
-    const summary = await runBillingWorker();
-    return NextResponse.json({
-      success: true,
-      processedWebhooks: summary.processedWebhooks,
-      provisionedCustomers: summary.provisionedCustomers,
-      createdBatches: summary.createdBatches,
-      reportedBatches: summary.reportedBatches,
-      errorsCount: summary.errors.length,
-    });
-  } catch (err) {
-    console.error("[Billing Cron] Worker execution error:", (err as Error).message);
-    return NextResponse.json({ error: "Worker execution failed." }, { status: 500 });
-  }
+      try {
+        const config = getValidatedStripeConfig();
+        cronSecret = config.cronSecret || process.env.CRON_SECRET;
+      } catch {
+        logger.error("billing.cron_config_unavailable", {
+          requestId,
+          route: "/api/cron/billing",
+          method: "GET",
+          statusCode: 503,
+          durationMs: Date.now() - startTime,
+          outcome: "error",
+          errorCode: "STRIPE_CONFIG_UNAVAILABLE",
+        });
+
+        return NextResponse.json(
+          { error: "Billing service unavailable." },
+          { status: 503, headers: { "X-Request-ID": requestId } }
+        );
+      }
+
+      if (!cronSecret || !timingSafeSecretMatch(cronSecret, authHeader)) {
+        logger.warn("billing.cron_unauthorized", {
+          requestId,
+          route: "/api/cron/billing",
+          method: "GET",
+          statusCode: 401,
+          durationMs: Date.now() - startTime,
+          outcome: "unauthorized",
+          errorCode: "CRON_UNAUTHORIZED",
+        });
+
+        return NextResponse.json(
+          { error: "Unauthorized." },
+          { status: 401, headers: { "X-Request-ID": requestId } }
+        );
+      }
+
+      try {
+        const summary = await runBillingWorker();
+        const durationMs = Date.now() - startTime;
+
+        logger.info("billing.cron_completed", {
+          requestId,
+          route: "/api/cron/billing",
+          method: "GET",
+          statusCode: 200,
+          durationMs,
+          outcome: "success",
+          details: {
+            processedWebhooks: summary.processedWebhooks,
+            provisionedCustomers: summary.provisionedCustomers,
+            createdBatches: summary.createdBatches,
+            reportedBatches: summary.reportedBatches,
+            errorsCount: summary.errors.length,
+          },
+        });
+
+        return NextResponse.json(
+          {
+            success: true,
+            processedWebhooks: summary.processedWebhooks,
+            provisionedCustomers: summary.provisionedCustomers,
+            createdBatches: summary.createdBatches,
+            reportedBatches: summary.reportedBatches,
+            errorsCount: summary.errors.length,
+          },
+          { status: 200, headers: { "X-Request-ID": requestId } }
+        );
+      } catch (err) {
+        const durationMs = Date.now() - startTime;
+        logger.error("billing.cron_execution_failed", {
+          requestId,
+          route: "/api/cron/billing",
+          method: "GET",
+          statusCode: 500,
+          durationMs,
+          outcome: "failure",
+          errorCode: (err as Error).name || "CRON_WORKER_FAILED",
+        });
+
+        return NextResponse.json(
+          { error: "Worker execution failed." },
+          { status: 500, headers: { "X-Request-ID": requestId } }
+        );
+      }
+    },
+    { "http.route": "/api/cron/billing", "http.method": "GET" }
+  );
 }

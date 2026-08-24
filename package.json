@@ -13,7 +13,7 @@
     "test:integration": "dotenv -e .env.local -e .env -- vitest run --config vitest.integration.config.ts",
     "test:redis-integration": "dotenv -e .env.local -e .env -- vitest run tests/integration/redis-ratelimit.test.ts --config vitest.integration.config.ts",
     "test:stripe-integration": "dotenv -e .env.local -e .env -- vitest run tests/integration/stripe-billing.test.ts --config vitest.integration.config.ts",
-    "test:webhook-e2e": "dotenv -e .env.local -e .env -- vitest run tests/stripe-webhook-e2e.test.ts --config vitest.integration.config.ts",
+    "test:webhook-e2e": "dotenv -e .env.local -e .env -- vitest run tests/integration/stripe-webhook-e2e.test.ts --config vitest.integration.config.ts",
     "db:generate": "dotenv -e .env.local -e .env -- drizzle-kit generate",
     "db:migrate": "dotenv -e .env.local -e .env -- tsx src/db/migrate.ts",
     "db:check": "dotenv -e .env.local -e .env -- drizzle-kit check",
@@ -23,13 +23,18 @@
     "verify:http": "dotenv -e .env.local -e .env -- tsx src/db/http-e2e-verification.ts",
     "stripe:verify-config": "dotenv -e .env.local -e .env -- tsx src/scripts/stripe-verify-config.ts",
     "billing:worker": "dotenv -e .env.local -e .env -- tsx src/scripts/billing-worker-cli.ts",
-    "billing:reconcile": "dotenv -e .env.local -e .env -- tsx src/scripts/billing-reconcile-cli.ts"
+    "billing:reconcile": "dotenv -e .env.local -e .env -- tsx src/scripts/billing-reconcile-cli.ts",
+    "openapi:check": "tsx src/scripts/openapi-check.ts",
+    "deploy:preflight": "dotenv -e .env.local -e .env -- tsx src/scripts/deploy-preflight.ts",
+    "deploy:verify": "tsx src/scripts/deploy-verify.ts",
+    "health:check": "tsx src/scripts/health-check-cli.ts"
   },
   "engines": {
     "node": ">=20.9.0",
     "pnpm": ">=9.0.0"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.38.2",
     "better-auth": "^1.1.21",
@@ -44,6 +49,7 @@
     "server-only": "^0.0.1",
     "sharp": "0.35.3",
     "stripe": "22.5.0",
+    "swagger-ui-dist": "^5.32.14",
     "tailwind-merge": "^3.0.1",
     "zod": "^3.24.2"
   },
@@ -54,6 +60,7 @@
     "@types/pg": "^8.11.11",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
+    "@types/swagger-ui-dist": "^3.30.6",
     "autoprefixer": "^10.4.20",
     "dotenv": "^16.4.7",
     "dotenv-cli": "^11.0.0",

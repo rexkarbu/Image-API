@@ -1,0 +1,57 @@
+name: CI Quality & Verification Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Lint, Typecheck, Unit Tests & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit Production Dependencies
+        run: pnpm audit --prod
+
+      - name: Validate OpenAPI 3.1.1 Specification
+        run: pnpm openapi:check
+
+      - name: Lint Codebase
+        run: pnpm lint
+
+      - name: Typecheck TypeScript
+        run: pnpm typecheck
+
+      - name: Run In-Memory Unit Tests
+        run: pnpm test
+
+      - name: Build Next.js Application
+        run: pnpm build
+        env:
+          NODE_ENV: production
+          NEXT_TELEMETRY_DISABLED: "1"
+          # Mock test values for build-time safety
+          BETTER_AUTH_SECRET: "0123456789abcdef0123456789abcdef"
+          BETTER_AUTH_URL: "http://localhost:3000"

@@ -278,3 +278,25 @@ Before any production deployment:
 ### Owner-Only Authorization & Customer Portal
 - Customer provisioning occurs safely without blocking organization creation.
 - Hosted Stripe Checkout (mode: `subscription`) and Customer Portal sessions are restricted to verified organization owners. All pricing and customer identifiers are derived strictly on the server.
+
+---
+
+## 12. Observability, Health Checks & OpenAPI Specification
+
+### Structured Request Logging
+- Server-side logging emits single-line JSON logs with strict field allowlisting.
+- Recursive redaction automatically filters passwords, secrets, connection strings, and credential prefixes (`img_live_`, `sk_live_`, `sk_test_`, `whsec_`).
+- Inbound `X-Request-ID` is strictly validated against `^[A-Za-z0-9._:-]{1,128}$` or securely generated if missing.
+
+### OpenTelemetry Tracing
+- Next.js instrumentation convention initialized in `src/instrumentation.ts` under service name `image-api`.
+- Low-cardinality span attributes wrap critical operations: API authentication, rate limit checks, multipart parsing, Sharp processing, database usage logging, webhook ingestion, billing worker batches, and reconciliation.
+
+### Health Check Probes
+- `GET /api/health/live`: Process liveness probe, performs zero network I/O, returns HTTP 200.
+- `GET /api/health/ready`: Critical request-path readiness probe, runs parallel read-only queries against PostgreSQL and Redis with a 2500ms timeout, returning HTTP 200 (healthy) or HTTP 503 (degraded). Stripe is excluded from readiness blocking.
+
+### OpenAPI 3.1.1 Developer Portal
+- Canonical OpenAPI 3.1.1 specification served at `GET /openapi.json`.
+- Interactive Swagger UI developer portal at `GET /docs` configured with `persistAuthorization: false` and session-only credential notice.
+- Internal webhook and billing cron endpoints are strictly excluded from the public OpenAPI specification.

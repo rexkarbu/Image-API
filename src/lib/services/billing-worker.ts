@@ -16,6 +16,8 @@ import { getValidatedStripeConfig } from "@/lib/stripe/safety";
 import { processWebhookEventRecord } from "./billing-webhooks";
 import { provisionStripeCustomer } from "./billing-customers";
 import { STRIPE_METER_EVENT_ID_PREFIX, MAX_USAGE_BATCH_SIZE } from "@/lib/stripe/config";
+import { logger } from "@/lib/observability/logger";
+import { withSpan } from "@/lib/observability/tracer";
 import Stripe from "stripe";
 
 const WORKER_NAME = "billing_primary_worker";
@@ -197,50 +199,75 @@ async function reportBatchToStripe(
     return false;
   }
 
-  try {
-    await stripe.billing.meterEvents.create({
-      event_name: config.meterEventName,
-      payload: {
-        stripe_customer_id: batch.stripeCustomerId,
-        value: String(batch.units),
-      },
-      identifier: batch.meterEventIdentifier,
-      timestamp: timestampSeconds,
-    });
+  return withSpan(
+    "billing.meter.report",
+    async (span) => {
+      span.setAttribute("billing.batch_id", batch.id);
+      span.setAttribute("billing.units", batch.units);
 
-    await client
-      .update(billingUsageBatches)
-      .set({
-        status: "reported",
-        reportedAt: new Date(),
-        errorCode: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(billingUsageBatches.id, batch.id));
+      try {
+        await stripe.billing.meterEvents.create({
+          event_name: config.meterEventName,
+          payload: {
+            stripe_customer_id: batch.stripeCustomerId,
+            value: String(batch.units),
+          },
+          identifier: batch.meterEventIdentifier,
+          timestamp: timestampSeconds,
+        });
 
-    return true;
-  } catch (error) {
-    let errorCode = "meter_event_error";
-    if (error instanceof Stripe.errors.StripeError) {
-      errorCode = error.code || error.type || "stripe_error";
-    }
+        await client
+          .update(billingUsageBatches)
+          .set({
+            status: "reported",
+            reportedAt: new Date(),
+            errorCode: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(billingUsageBatches.id, batch.id));
 
-    const nextAttempt = batch.attemptCount + 1;
-    const backoffMs = Math.min(3600 * 1000, Math.pow(2, nextAttempt) * 5000);
+        logger.info("billing.meter_event_reported", {
+          details: {
+            batchId: batch.id,
+            units: batch.units,
+            identifier: batch.meterEventIdentifier,
+          },
+        });
 
-    await client
-      .update(billingUsageBatches)
-      .set({
-        status: nextAttempt >= 5 ? "failed" : "pending",
-        attemptCount: nextAttempt,
-        nextRetryAt: new Date(Date.now() + backoffMs),
-        errorCode,
-        updatedAt: new Date(),
-      })
-      .where(eq(billingUsageBatches.id, batch.id));
+        return true;
+      } catch (error) {
+        let errorCode = "meter_event_error";
+        if (error instanceof Stripe.errors.StripeError) {
+          errorCode = error.code || error.type || "stripe_error";
+        }
 
-    return false;
-  }
+        const nextAttempt = batch.attemptCount + 1;
+        const backoffMs = Math.min(3600 * 1000, Math.pow(2, nextAttempt) * 5000);
+
+        await client
+          .update(billingUsageBatches)
+          .set({
+            status: nextAttempt >= 5 ? "failed" : "pending",
+            attemptCount: nextAttempt,
+            nextRetryAt: new Date(Date.now() + backoffMs),
+            errorCode,
+            updatedAt: new Date(),
+          })
+          .where(eq(billingUsageBatches.id, batch.id));
+
+        logger.error("billing.meter_event_report_failed", {
+          errorCode,
+          details: {
+            batchId: batch.id,
+            attemptCount: nextAttempt,
+          },
+        });
+
+        return false;
+      }
+    },
+    { "billing.operation": "report_meter_event" }
+  );
 }
 
 /**
@@ -254,6 +281,10 @@ export async function runBillingWorker(
   const acquired = await acquireWorkerLease(leaseToken, client);
 
   if (!acquired) {
+    logger.warn("billing.worker_lease_busy", {
+      details: { reason: "Lease already held by another worker instance." },
+    });
+
     return {
       processedWebhooks: 0,
       provisionedCustomers: 0,
@@ -263,13 +294,16 @@ export async function runBillingWorker(
     };
   }
 
-  const result: WorkerRunResult = {
-    processedWebhooks: 0,
-    provisionedCustomers: 0,
-    createdBatches: 0,
-    reportedBatches: 0,
-    errors: [],
-  };
+  return withSpan(
+    "billing.worker.run",
+    async (span) => {
+      const result: WorkerRunResult = {
+        processedWebhooks: 0,
+        provisionedCustomers: 0,
+        createdBatches: 0,
+        reportedBatches: 0,
+        errors: [],
+      };
 
   try {
     // 1. Process pending webhook inbox events
@@ -377,4 +411,7 @@ export async function runBillingWorker(
   }
 
   return result;
+},
+{ "billing.operation": "worker_run" }
+);
 }

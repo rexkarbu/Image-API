@@ -54,7 +54,15 @@ Usage-based developer platform for image resizing, format conversion, and optimi
 - Two-layer usage reconciliation (local database vs. provider Stripe Meter Event Summaries) with settlement lag handling.
 - Accessible billing dashboard (`/dashboard/billing`) featuring test-mode indicator, period usage metrics, and invoice history.
 
-*Milestone 6 (Observability, Production Hardening, and Documentation Portal) is scheduled next.*
+**Milestone 6.0 — Observability, OpenAPI Developer Portal, Health Checks, and Production Deployment Readiness** (Completed)
+- Structured, security-safe JSON request logging with recursive secret and connection-string redaction.
+- OpenTelemetry distributed tracing with low-cardinality span instrumentation across all critical request lifecycles.
+- Canonical OpenAPI 3.1.1 specification (`/openapi.json`) and interactive Swagger UI developer portal (`/docs`).
+- Process liveness (`/api/health/live`) and critical request-path readiness (`/api/health/ready`) probes.
+- Production alert policies (`docs/alerts.md`) and operational incident response runbooks (`docs/runbooks/incident-response.md`).
+- Deployment readiness tooling (`pnpm deploy:preflight`, `pnpm deploy:verify`, `pnpm openapi:check`, `pnpm health:check`) and GitHub Actions CI workflow (`.github/workflows/ci.yml`).
+
+*Milestone 6.1 (Live Preview / Production Deployment Acceptance & Verification) is scheduled next.*
 
 ---
 
