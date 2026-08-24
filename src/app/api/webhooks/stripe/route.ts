@@ -100,7 +100,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           statusCode: 400,
           durationMs,
           outcome: "failure",
-          errorCode: (err as Error).name || "WEBHOOK_VERIFICATION_FAILED",
+          errorCode: (err as Error).message || "WEBHOOK_VERIFICATION_FAILED",
         });
 
         return NextResponse.json(

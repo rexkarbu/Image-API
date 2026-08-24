@@ -40,8 +40,8 @@ export async function verifyAndRecordWebhookEvent(
   let event: Stripe.Event;
   try {
     event = stripe.webhooks.constructEvent(rawBody, signature, config.webhookSecret);
-  } catch {
-    throw new Error("Invalid webhook signature or payload.");
+  } catch (err) {
+    throw new Error((err as Error).message || "Invalid webhook signature or payload.");
   }
 
   if (event.livemode !== false) {
