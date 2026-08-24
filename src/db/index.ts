@@ -21,16 +21,15 @@ declare global {
 
 function getConnectionString(): string {
   const url = process.env.DATABASE_URL;
-  const isProductionOrPreview =
-    process.env.NODE_ENV === "production" ||
-    process.env.VERCEL_ENV === "production" ||
-    process.env.VERCEL_ENV === "preview";
+  const isDeployedVercel = Boolean(
+    process.env.VERCEL_ENV && process.env.VERCEL_ENV !== "development"
+  );
 
   if (url && url.trim() !== "") {
     return url.trim();
   }
 
-  if (!isProductionOrPreview) {
+  if (!isDeployedVercel) {
     return "postgres://postgres:postgres@localhost:5432/image_api_db";
   }
 

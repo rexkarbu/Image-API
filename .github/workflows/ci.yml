@@ -59,3 +59,4 @@ jobs:
           # Mock test values for build-time safety
           BETTER_AUTH_SECRET: "0123456789abcdef0123456789abcdef"
           BETTER_AUTH_URL: "http://localhost:3000"
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/image_api_db"

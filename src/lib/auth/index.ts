@@ -6,16 +6,15 @@ import { resolveApplicationOrigin } from "@/lib/security/origin";
 
 function getBetterAuthSecret(): string {
   const secret = process.env.BETTER_AUTH_SECRET;
-  const isProductionOrPreview =
-    process.env.NODE_ENV === "production" ||
-    process.env.VERCEL_ENV === "production" ||
-    process.env.VERCEL_ENV === "preview";
+  const isDeployedVercel = Boolean(
+    process.env.VERCEL_ENV && process.env.VERCEL_ENV !== "development"
+  );
 
   if (secret && secret.trim().length >= 32) {
     return secret.trim();
   }
 
-  if (!isProductionOrPreview) {
+  if (!isDeployedVercel) {
     return "development-and-build-placeholder-secret-min-32-chars-long";
   }
 
