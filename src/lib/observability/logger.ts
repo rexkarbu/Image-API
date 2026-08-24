@@ -23,7 +23,6 @@ export interface LogPayload {
   outcome?: LogOutcome;
   errorCode?: string;
   details?: Record<string, unknown>;
-  [key: string]: unknown;
 }
 
 export interface StructuredLogEntry {
@@ -44,7 +43,7 @@ export interface StructuredLogEntry {
   details?: Record<string, unknown>;
 }
 
-const SENSITIVE_KEY_REGEX = /(?:key|secret|token|auth|cookie|password|database|redis|stripe|conn|url|cert|signature|payload|body|image|card|email)/i;
+const SENSITIVE_KEY_REGEX = /(?:key|secret|token|auth|cookie|password|database|redis|stripe|conn|url|cert|signature|payload|body|image|card|email|session|idempotency)/i;
 const ALLOWED_REQUEST_ID_REGEX = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /**
@@ -62,6 +61,42 @@ export function resolveRequestId(incomingHeader?: string | null): string {
 }
 
 /**
+ * Redacts known sensitive patterns embedded anywhere inside a string.
+ */
+export function redactSensitiveString(value: string): string {
+  if (!value || typeof value !== "string") return value;
+
+  let result = value;
+
+  // 1. Bearer / Authorization headers
+  result = result.replace(/Authorization:\s*Bearer\s+[^\s]+/gi, "Authorization: Bearer [REDACTED]");
+  result = result.replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]");
+
+  // 2. API Keys and Stripe secrets anywhere in string
+  result = result.replace(/img_live_[A-Za-z0-9_-]+/g, "[REDACTED_CREDENTIAL]");
+  result = result.replace(/sk_(?:test|live)_[A-Za-z0-9]+/g, "[REDACTED_CREDENTIAL]");
+  result = result.replace(/whsec_[A-Za-z0-9]+/g, "[REDACTED_CREDENTIAL]");
+
+  // 3. Database and Redis connection strings
+  result = result.replace(/postgres(?:ql)?:\/\/[^\s"']+/gi, "[REDACTED_CONNECTION_STRING]");
+  result = result.replace(/redis(?:s)?:\/\/[^\s"']+/gi, "[REDACTED_CONNECTION_STRING]");
+
+  // 4. URLs with embedded credentials (user:pass@host)
+  result = result.replace(/https?:\/\/[^:\s]+:[^@\s]+@[^\s]+/gi, "[REDACTED_URL]");
+
+  // 5. Emails
+  result = result.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[REDACTED_EMAIL]");
+
+  // 6. Session and cookie tokens
+  result = result.replace(/(?:session|token|auth)=[^;\s]+/gi, "[REDACTED_COOKIE]");
+
+  // 7. Long 64-char hex strings (raw hashes / keys)
+  result = result.replace(/\b[0-9a-f]{64}\b/gi, "[REDACTED_HASH]");
+
+  return result.length > 500 ? result.slice(0, 500) + "... [Truncated]" : result;
+}
+
+/**
  * Recursively sanitizes and redacts sensitive information from log payloads.
  */
 export function sanitizeLogDetails(obj: unknown, depth = 0): unknown {
@@ -69,14 +104,7 @@ export function sanitizeLogDetails(obj: unknown, depth = 0): unknown {
   if (obj === null || obj === undefined) return obj;
 
   if (typeof obj === "string") {
-    // Redact obvious secret patterns
-    if (obj.startsWith("img_live_") || obj.startsWith("sk_live_") || obj.startsWith("sk_test_") || obj.startsWith("whsec_")) {
-      return "[REDACTED_CREDENTIAL]";
-    }
-    if (obj.startsWith("postgres://") || obj.startsWith("postgresql://") || obj.startsWith("redis://") || obj.startsWith("rediss://")) {
-      return "[REDACTED_CONNECTION_STRING]";
-    }
-    return obj.length > 500 ? obj.slice(0, 500) + "... [Truncated]" : obj;
+    return redactSensitiveString(obj);
   }
 
   if (typeof obj === "number" || typeof obj === "boolean") {
@@ -99,13 +127,13 @@ export function sanitizeLogDetails(obj: unknown, depth = 0): unknown {
     return result;
   }
 
-  return String(obj);
+  return redactSensitiveString(String(obj));
 }
 
 /**
  * Creates and formats a structured JSON log entry.
  */
-function createStructuredLog(
+export function createStructuredLog(
   level: LogLevel,
   event: string,
   payload: LogPayload = {}
@@ -121,8 +149,12 @@ function createStructuredLog(
     const activeSpan = trace.getActiveSpan();
     if (activeSpan) {
       const spanContext = activeSpan.spanContext();
-      if (spanContext.traceId) traceId = spanContext.traceId;
-      if (spanContext.spanId) spanId = spanContext.spanId;
+      if (spanContext.traceId && !/^0+$/.test(spanContext.traceId)) {
+        traceId = spanContext.traceId;
+      }
+      if (spanContext.spanId && !/^0+$/.test(spanContext.spanId)) {
+        spanId = spanContext.spanId;
+      }
     }
   } catch {
     // Graceful fallback if OpenTelemetry API context is unavailable

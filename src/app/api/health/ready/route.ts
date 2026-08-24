@@ -3,68 +3,71 @@ import { pool } from "@/db";
 import { getRedisClient } from "@/lib/ratelimit/redis-safety";
 import { resolveRequestId, logger } from "@/lib/observability/logger";
 import { withSpan } from "@/lib/observability/tracer";
+import { verifyHealthAuth, evaluateReadiness } from "@/lib/health/readiness-core";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const CHECK_TIMEOUT_MS = 2500;
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, name: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${name}_timeout`));
-    }, timeoutMs);
-
-    promise
-      .then((res) => {
-        clearTimeout(timer);
-        resolve(res);
-      })
-      .catch((err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-  });
-}
-
 export async function GET(request: Request) {
   const startTime = Date.now();
   const requestId = resolveRequestId(request.headers.get("x-request-id"));
+  const authHeader = request.headers.get("authorization");
+  const isProduction = process.env.NODE_ENV === "production";
+  const healthSecret = process.env.HEALTHCHECK_SECRET;
+
+  // 1. Verify healthcheck authorization in production
+  const isAuthorized = verifyHealthAuth(authHeader, isProduction, healthSecret);
+
+  if (!isAuthorized) {
+    logger.warn("health.ready_unauthorized", {
+      requestId,
+      route: "/api/health/ready",
+      method: "GET",
+      statusCode: 401,
+      durationMs: Date.now() - startTime,
+      outcome: "unauthorized",
+      errorCode: "UNAUTHORIZED",
+    });
+
+    return NextResponse.json(
+      {
+        error: {
+          code: "UNAUTHORIZED",
+          message: "Healthcheck authentication required.",
+          requestId,
+        },
+      },
+      {
+        status: 401,
+        headers: {
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-ID": requestId,
+        },
+      }
+    );
+  }
 
   return withSpan(
     "health.ready",
     async (span) => {
-      // 1. Check PostgreSQL
-      const dbPromise = withTimeout(
-        pool.query("SELECT 1 AS ready"),
-        CHECK_TIMEOUT_MS,
-        "database"
+      // 2. Evaluate dependencies in parallel with strict validation
+      const checkResult = await evaluateReadiness(
+        {
+          queryDatabase: () => pool.query("SELECT 1 AS ready"),
+          pingRedis: () => getRedisClient().ping(),
+        },
+        2000
       );
-
-      // 2. Check Upstash Redis
-      const redisPromise = withTimeout(
-        (async () => {
-          const redis = getRedisClient();
-          return await redis.ping();
-        })(),
-        CHECK_TIMEOUT_MS,
-        "redis"
-      );
-
-      const [dbResult, redisResult] = await Promise.allSettled([dbPromise, redisPromise]);
-
-      const databaseHealthy = dbResult.status === "fulfilled";
-      const redisHealthy = redisResult.status === "fulfilled";
-      const allHealthy = databaseHealthy && redisHealthy;
 
       const durationMs = Date.now() - startTime;
-      const statusCode = allHealthy ? 200 : 503;
+      const statusCode = checkResult.allHealthy ? 200 : 503;
 
-      span.setAttribute("health.database", databaseHealthy ? "healthy" : "unhealthy");
-      span.setAttribute("health.redis", redisHealthy ? "healthy" : "unhealthy");
-      span.setAttribute("health.status", allHealthy ? "ready" : "unhealthy");
+      span.setAttribute("health.database", checkResult.database);
+      span.setAttribute("health.redis", checkResult.redis);
+      span.setAttribute("health.status", checkResult.allHealthy ? "ready" : "unhealthy");
 
-      if (allHealthy) {
+      if (checkResult.allHealthy) {
         logger.debug("health.ready_checked", {
           requestId,
           route: "/api/health/ready",
@@ -87,19 +90,19 @@ export async function GET(request: Request) {
           outcome: "failure",
           errorCode: "HEALTH_CHECK_FAILED",
           details: {
-            database: databaseHealthy ? "healthy" : "unhealthy",
-            redis: redisHealthy ? "healthy" : "unhealthy",
+            database: checkResult.database,
+            redis: checkResult.redis,
           },
         });
       }
 
       return NextResponse.json(
         {
-          status: allHealthy ? "ready" : "unhealthy",
+          status: checkResult.allHealthy ? "ready" : "unhealthy",
           service: "image-api",
           checks: {
-            database: databaseHealthy ? "healthy" : "unhealthy",
-            redis: redisHealthy ? "healthy" : "unhealthy",
+            database: checkResult.database,
+            redis: checkResult.redis,
           },
         },
         {

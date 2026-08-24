@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Lint, Typecheck, Unit Tests & Build
@@ -27,7 +30,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v3
         with:
-          version: 9
+          version: 9.15.4
 
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
@@ -35,7 +38,7 @@ jobs:
       - name: Audit Production Dependencies
         run: pnpm audit --prod
 
-      - name: Validate OpenAPI 3.1.1 Specification
+      - name: Validate OpenAPI 3.1 Specification
         run: pnpm openapi:check
 
       - name: Lint Codebase

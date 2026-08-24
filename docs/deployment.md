@@ -15,7 +15,7 @@
 | :--- | :--- | :--- | :--- | :--- |
 | `NODE_ENV` | `development` | `production` | `production` | No |
 | `VERCEL_ENV` | *(unset)* | `preview` | `production` | No |
-| `BETTER_AUTH_URL` | `http://localhost:3000` | `https://preview-<hash>.vercel.app` | `https://api.imageapi.dev` | No |
+| `BETTER_AUTH_URL` | `http://localhost:3000` | `https://preview-<hash>.vercel.app` | `https://<your-production-domain>` | No |
 | `BETTER_AUTH_SECRET` | `<32-byte-hex>` | `<32-byte-hex>` | `<32-byte-hex>` | **YES** |
 | `DATABASE_URL` | `postgresql://...?sslmode=verify-full` | `postgresql://...?sslmode=verify-full` | `postgresql://...?sslmode=verify-full` | **YES** |
 | `DIRECT_DATABASE_URL` | `postgresql://...?sslmode=verify-full` | `postgresql://...?sslmode=verify-full` | `postgresql://...?sslmode=verify-full` | **YES** |
@@ -28,6 +28,7 @@
 | `STRIPE_METERED_PRICE_ID` | `price_...` | `price_...` | `price_...` | No |
 | `STRIPE_METER_EVENT_NAME` | `image_transform` | `image_transform` | `image_transform` | No |
 | `CRON_SECRET` | `<32-byte-hex>` | `<32-byte-hex>` | `<32-byte-hex>` | **YES** |
+| `HEALTHCHECK_SECRET` | *(unset)* | `<32-byte-hex>` | `<32-byte-hex>` | **YES** |
 
 ---
 
@@ -46,7 +47,7 @@ Validates a target deployment URL (must be HTTPS for remote domains; allows loop
 pnpm deploy:verify -- https://preview-deployment.vercel.app
 
 # Verify Production
-pnpm deploy:verify -- https://api.imageapi.dev
+pnpm deploy:verify -- https://<your-production-domain>
 ```
 
 Checks executed by `deploy:verify`:

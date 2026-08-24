@@ -16,7 +16,7 @@
 ### Triage Steps
 1. Execute CLI readiness check:
    ```bash
-   pnpm health:check -- https://api.imageapi.dev
+   pnpm health:check -- https://<your-production-domain>
    ```
 2. Check PostgreSQL connectivity & SSL verification:
    ```bash

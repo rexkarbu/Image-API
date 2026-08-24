@@ -1,7 +1,13 @@
-import { describe, it, expect } from "vitest";
-import { resolveRequestId, sanitizeLogDetails } from "@/lib/observability/logger";
+import { describe, it, expect, vi } from "vitest";
+import {
+  resolveRequestId,
+  sanitizeLogDetails,
+  redactSensitiveString,
+  createStructuredLog,
+  logger,
+} from "@/lib/observability/logger";
 
-describe("Observability Logger & Request ID Sanitization Unit Tests", () => {
+describe("Observability Logger & Request ID Sanitization Adversarial Tests", () => {
   describe("resolveRequestId", () => {
     it("accepts valid, bounded incoming X-Request-ID headers", () => {
       expect(resolveRequestId("req-12345")).toBe("req-12345");
@@ -28,66 +34,109 @@ describe("Observability Logger & Request ID Sanitization Unit Tests", () => {
       expect(resolveRequestId("req<script>alert(1)</script>")).toMatch(uuidRegex);
       expect(resolveRequestId("req 1234 invalid space")).toMatch(uuidRegex);
       expect(resolveRequestId("req$special!chars")).toMatch(uuidRegex);
-      expect(resolveRequestId("A".repeat(129))).toMatch(uuidRegex); // exceeds 128 chars
+      expect(resolveRequestId("A".repeat(129))).toMatch(uuidRegex);
     });
   });
 
-  describe("sanitizeLogDetails", () => {
-    it("redacts sensitive keys in objects", () => {
-      const input = {
-        apiKey: "img_live_mock123",
-        secretToken: "secret_123",
-        userEmail: "user@example.com",
-        password: "supersecretpassword",
-        authorization: "Bearer token",
-        databaseUrl: "postgresql://user:pass@host/db",
-        normalField: "safe-value",
-        count: 42,
-      };
-
-      const sanitized = sanitizeLogDetails(input) as Record<string, unknown>;
-
-      expect(sanitized.apiKey).toBe("[REDACTED]");
-      expect(sanitized.secretToken).toBe("[REDACTED]");
-      expect(sanitized.userEmail).toBe("[REDACTED]");
-      expect(sanitized.password).toBe("[REDACTED]");
-      expect(sanitized.authorization).toBe("[REDACTED]");
-      expect(sanitized.databaseUrl).toBe("[REDACTED]");
-      expect(sanitized.normalField).toBe("safe-value");
-      expect(sanitized.count).toBe(42);
-    });
-
-    it("redacts credential strings by prefix even in non-sensitive keys", () => {
-      const input = {
-        meta: "img_live_some_secret_key",
-        stripe: "sk_test_mock_secret",
-        webhook: "whsec_mock_secret",
-        conn: "postgres://user:pass@ep.neon.tech/db?sslmode=verify-full",
-      };
-
-      const sanitized = sanitizeLogDetails(input) as Record<string, unknown>;
-      expect(sanitized.meta).toBe("[REDACTED_CREDENTIAL]");
-      expect(sanitized.stripe).toBe("[REDACTED]");
-      expect(sanitized.webhook).toBe("[REDACTED_CREDENTIAL]");
-      expect(sanitized.conn).toBe("[REDACTED]");
-    });
-
-    it("handles nested arrays and objects recursively with depth limits", () => {
-      const nested = {
-        level1: {
-          level2: {
-            safe: "ok",
-            apiKeyId: "key_123",
-          },
-          items: [{ key: "bad" }, { name: "good" }],
+  describe("redactSensitiveString", () => {
+    it("redacts credentials and sensitive tokens embedded anywhere in strings", () => {
+      const tests = [
+        {
+          input: "User authorization header is Authorization: Bearer img_live_abcdef1234567890",
+          expectedNotToContain: "img_live_abcdef1234567890",
         },
+        {
+          input: "Received webhook with signature whsec_abcdef1234567890 for customer",
+          expectedNotToContain: "whsec_abcdef1234567890",
+        },
+        {
+          input: "Stripe error using key sk_test_51MockSecretKey1234567890",
+          expectedNotToContain: "sk_test_51MockSecretKey1234567890",
+        },
+        {
+          input: "Database URL: postgresql://admin:secretPass123@ep-neon.tech/db?sslmode=verify-full",
+          expectedNotToContain: "secretPass123",
+        },
+        {
+          input: "Redis URL: rediss://default:redisToken999@us1.upstash.io:6379",
+          expectedNotToContain: "redisToken999",
+        },
+        {
+          input: "Fetch url: https://user:pass123@api.internal.net/sync",
+          expectedNotToContain: "pass123",
+        },
+        {
+          input: "Notification sent to user customer.support@company.org in tenant",
+          expectedNotToContain: "customer.support@company.org",
+        },
+        {
+          input: "Cookie header: session=sess_token_987654321; other=123",
+          expectedNotToContain: "sess_token_987654321",
+        },
+      ];
+
+      for (const t of tests) {
+        const result = redactSensitiveString(t.input);
+        expect(result).not.toContain(t.expectedNotToContain);
+      }
+    });
+  });
+
+  describe("Captured Serialized JSON Logs Secret Absence Proof", () => {
+    it("proves that console.info outputs serialized JSON without fixture secrets", () => {
+      const consoleSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+      const fixtureSecrets = {
+        apiKey: "img_live_super_secret_test_key_12345678",
+        stripeSecret: "sk_test_51SecretStripeKey999888777",
+        webhookSecret: "whsec_super_secret_webhook_signature_token",
+        postgresUri: "postgres://neondb_owner:NeonSecretPassword123@ep-cold-lake.us-east-2.aws.neon.tech/neondb",
+        redisUri: "https://upstash.io/token_abc123_very_secret",
+        userEmail: "ceo@enterprise-client.com",
+        bearerToken: "Bearer img_live_super_secret_test_key_12345678",
+        hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       };
 
-      const sanitized = sanitizeLogDetails(nested) as any;
-      expect(sanitized.level1.level2.safe).toBe("ok");
-      expect(sanitized.level1.level2.apiKeyId).toBe("[REDACTED]");
-      expect(sanitized.level1.items[0].key).toBe("[REDACTED]");
-      expect(sanitized.level1.items[1].name).toBe("good");
+      logger.info("transform.completed", {
+        requestId: "req-clean-12345",
+        route: "/v1/images/transform",
+        method: "POST",
+        statusCode: 200,
+        durationMs: 45,
+        outcome: "success",
+        details: {
+          format: "webp",
+          width: 800,
+          height: 600,
+          meta1: `Header ${fixtureSecrets.bearerToken}`,
+          meta2: `Stripe ${fixtureSecrets.stripeSecret}`,
+          meta3: `Webhook ${fixtureSecrets.webhookSecret}`,
+          meta4: `Database ${fixtureSecrets.postgresUri}`,
+          meta5: `Email ${fixtureSecrets.userEmail}`,
+          meta6: fixtureSecrets.hash,
+        },
+      });
+
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      const loggedJsonString = consoleSpy.mock.calls[0][0];
+
+      // Parse output as valid JSON
+      const parsedLog = JSON.parse(loggedJsonString);
+      expect(parsedLog.event).toBe("transform.completed");
+      expect(parsedLog.service).toBe("image-api");
+      expect(parsedLog.statusCode).toBe(200);
+      expect(parsedLog.details.format).toBe("webp");
+      expect(parsedLog.details.width).toBe(800);
+
+      // Strictly assert that ZERO fixture secrets appear in the serialized JSON string
+      expect(loggedJsonString).not.toContain("super_secret_test_key");
+      expect(loggedJsonString).not.toContain("SecretStripeKey");
+      expect(loggedJsonString).not.toContain("super_secret_webhook");
+      expect(loggedJsonString).not.toContain("NeonSecretPassword123");
+      expect(loggedJsonString).not.toContain("ceo@enterprise-client.com");
+      expect(loggedJsonString).not.toContain(fixtureSecrets.hash);
+
+      consoleSpy.mockRestore();
     });
   });
 });

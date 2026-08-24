@@ -1,8 +1,30 @@
 import "server-only";
-import { trace, Span, SpanStatusCode, Attributes } from "@opentelemetry/api";
+import { trace, Span, SpanStatusCode, Attributes, Exception } from "@opentelemetry/api";
 
 const TRACER_NAME = "image-api";
 const TRACER_VERSION = "0.1.0";
+
+export const ALLOWED_SPAN_ATTRIBUTES = new Set([
+  "http.method",
+  "http.route",
+  "http.status_code",
+  "image.target_format",
+  "image.output_format",
+  "image.width",
+  "image.height",
+  "image.size_bytes",
+  "billing.operation",
+  "billing.batch_id",
+  "billing.units",
+  "billing.reconcile_status",
+  "billing.difference",
+  "health.database",
+  "health.redis",
+  "health.status",
+  "error.type",
+]);
+
+const SENSITIVE_VALUE_REGEX = /(?:img_live_|sk_live_|sk_test_|whsec_|postgres(?:ql)?:\/\/|redis(?:s)?:\/\/|bearer\s+|password|token|secret|@)/i;
 
 /**
  * Retrieves the application OpenTelemetry tracer instance.
@@ -14,23 +36,38 @@ export function getTracer() {
 export type SpanAttributes = Record<string, string | number | boolean | undefined>;
 
 /**
- * Filter and sanitize low-cardinality span attributes.
- * Rejects high-cardinality / sensitive attributes (keys, tokens, emails, hashes, raw bodies).
+ * Filter and sanitize span attributes against a strict allowlist and sensitive content check.
+ * Rejects high-cardinality / sensitive attributes (keys, tokens, emails, hashes, raw bodies, connection strings).
  */
-function sanitizeSpanAttributes(attributes?: SpanAttributes): Attributes {
+export function sanitizeSpanAttributes(attributes?: SpanAttributes): Attributes {
   if (!attributes) return {};
   const sanitized: Attributes = {};
 
   for (const [key, value] of Object.entries(attributes)) {
     if (value === undefined || value === null) continue;
-    // Allow only safe primitive types
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      // Guard against accidental sensitive strings
-      if (typeof value === "string" && (value.startsWith("img_") || value.startsWith("sk_") || value.startsWith("whsec_"))) {
-        sanitized[key] = "[REDACTED]";
-      } else {
-        sanitized[key] = value;
+
+    // Strict allowlist validation
+    if (!ALLOWED_SPAN_ATTRIBUTES.has(key)) {
+      continue;
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+      sanitized[key] = value;
+      continue;
+    }
+
+    if (typeof value === "string") {
+      // Reject empty or whitespace-only
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+
+      // Reject sensitive substrings
+      if (SENSITIVE_VALUE_REGEX.test(trimmed)) {
+        continue;
       }
+
+      // Enforce bounded string length (max 128 chars)
+      sanitized[key] = trimmed.length > 128 ? trimmed.slice(0, 128) : trimmed;
     }
   }
 
@@ -38,8 +75,27 @@ function sanitizeSpanAttributes(attributes?: SpanAttributes): Attributes {
 }
 
 /**
+ * Sanitizes an exception to ensure zero secrets or raw SQL/payloads leak into traces.
+ */
+export function sanitizeException(error: unknown): Exception {
+  if (error instanceof Error) {
+    const code = (error as { code?: string })?.code || error.name || "Error";
+    // Check if error message contains sensitive tokens or URLs
+    let safeMessage = error.message;
+    if (SENSITIVE_VALUE_REGEX.test(safeMessage) || safeMessage.length > 200) {
+      safeMessage = code;
+    }
+    const safeError = new Error(safeMessage);
+    safeError.name = error.name && error.name !== "Error" ? error.name : error.constructor?.name || "Error";
+    return safeError;
+  }
+
+  return new Error(typeof error === "string" ? error.slice(0, 100) : "UnknownError");
+}
+
+/**
  * Executes a function within an OpenTelemetry active span.
- * Gracefully handles spans, records exceptions with sanitized error names, and ensures the span is closed.
+ * Records recording spans, sets sanitized attributes, captures sanitized exceptions, and closes span.
  */
 export async function withSpan<T>(
   name: string,
@@ -66,8 +122,11 @@ export async function withSpan<T>(
         message: errCode,
       });
 
+      // Record sanitized exception on the span
+      span.recordException(sanitizeException(error));
+
       // Record low-cardinality error attribute
-      span.setAttribute("error.type", errCode);
+      span.setAttribute("error.type", errCode.slice(0, 64));
 
       throw error;
     } finally {

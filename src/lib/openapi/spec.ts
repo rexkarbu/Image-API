@@ -1,27 +1,19 @@
 export const openApiSpec = {
-  openapi: "3.1.1",
+  openapi: "3.1.0",
   info: {
     title: "Image API Developer Platform",
     version: "1.0.0",
     description:
-      "Enterprise-grade, distributed multi-tenant image transformation and metered billing platform. Provides sub-50ms Sharp processing, strict tenancy isolation, and high-concurrency rate limiting.",
+      "Usage-based developer platform for image resizing, format conversion, and optimization. Features fail-closed rate limiting, strict multi-tenant isolation, and atomic usage metering.",
     contact: {
       name: "Image API Developer Support",
       url: "https://github.com/rexkarbu/Image-API",
     },
-    license: {
-      name: "MIT",
-      url: "https://opensource.org/licenses/MIT",
-    },
   },
   servers: [
     {
-      url: "http://localhost:3000",
-      description: "Local Development Server",
-    },
-    {
-      url: "https://api.imageapi.dev",
-      description: "Production Gateway (Target)",
+      url: "/",
+      description: "Current Server Origin",
     },
   ],
   security: [
@@ -38,25 +30,38 @@ export const openApiSpec = {
         description:
           "API Key issued from developer dashboard. Must begin with 'img_live_' and possess the 'image:transform' scope.",
       },
+      HealthSecretAuth: {
+        type: "http",
+        scheme: "bearer",
+        description:
+          "64-character hexadecimal healthcheck secret required in production environments.",
+      },
     },
     schemas: {
-      ErrorResponse: {
+      ErrorEnvelope: {
         type: "object",
-        required: ["error", "message"],
+        required: ["error"],
         properties: {
           error: {
-            type: "string",
-            example: "UNAUTHORIZED",
-            description: "Machine-readable error code.",
-          },
-          message: {
-            type: "string",
-            example: "Missing or invalid API key.",
-            description: "Human-readable sanitized error description.",
-          },
-          details: {
             type: "object",
-            description: "Optional context-specific error details.",
+            required: ["code", "message", "requestId"],
+            properties: {
+              code: {
+                type: "string",
+                example: "UNAUTHORIZED",
+                description: "Machine-readable domain error code.",
+              },
+              message: {
+                type: "string",
+                example: "Invalid API credentials.",
+                description: "Sanitized human-readable error description.",
+              },
+              requestId: {
+                type: "string",
+                example: "38378f24-e954-4808-a5e3-adc322016d77",
+                description: "Request correlation identifier.",
+              },
+            },
           },
         },
       },
@@ -112,7 +117,7 @@ export const openApiSpec = {
       post: {
         summary: "Transform and optimize an image",
         description:
-          "Accepts a multipart image payload, applies requested transformations (resize, re-encode, format conversion, quality tuning), returns binary image output, and records exactly 1 metered usage event.",
+          "Accepts a multipart image payload (JPEG, PNG, WebP), applies requested transformations (resize, re-encode, format conversion, quality tuning), returns binary image output, and records exactly 1 metered usage event upon completion. Duplicate requests with the same Idempotency-Key within an organization return 409 DUPLICATE_REQUEST without double metering.",
         operationId: "transformImage",
         parameters: [
           {
@@ -121,11 +126,12 @@ export const openApiSpec = {
             required: true,
             schema: {
               type: "string",
-              minLength: 1,
+              minLength: 16,
               maxLength: 128,
+              pattern: "^[!-~]{16,128}$",
             },
             description:
-              "Unique client-generated token guaranteeing exactly-once transformation execution and billing.",
+              "Unique client-generated token (16-128 printable ASCII characters without whitespace) guaranteeing deduplication and atomic metering.",
             example: "idem_9f82b7c4_20260824",
           },
           {
@@ -151,7 +157,7 @@ export const openApiSpec = {
                     type: "string",
                     format: "binary",
                     description:
-                      "Source image binary (max 10MB). Supported formats: JPEG, PNG, WebP, AVIF.",
+                      "Source image binary (max 10MB). Supported input formats: JPEG, PNG, WebP (AVIF input is rejected).",
                   },
                   width: {
                     type: "integer",
@@ -170,7 +176,8 @@ export const openApiSpec = {
                   format: {
                     type: "string",
                     enum: ["webp", "jpeg", "png", "avif"],
-                    description: "Target output format (defaults to source format if omitted).",
+                    default: "webp",
+                    description: "Target output format (defaults to 'webp').",
                     example: "webp",
                   },
                   quality: {
@@ -178,20 +185,20 @@ export const openApiSpec = {
                     minimum: 1,
                     maximum: 100,
                     default: 80,
-                    description: "Compression quality parameter (1..100).",
+                    description: "Compression quality parameter (1..100). Invalid when format is 'png'.",
                     example: 80,
                   },
                   fit: {
                     type: "string",
-                    enum: ["cover", "contain", "fill", "inside", "outside"],
-                    default: "cover",
-                    description: "Resize fit strategy.",
-                    example: "cover",
+                    enum: ["cover", "contain", "inside", "fill"],
+                    default: "inside",
+                    description: "Resize fit strategy (defaults to 'inside'). Requires both width and height to be set.",
+                    example: "inside",
                   },
                   withoutEnlargement: {
                     type: "boolean",
-                    default: false,
-                    description: "Prevent upscale if source is smaller than target dimensions.",
+                    default: true,
+                    description: "Prevent upscale if source image is smaller than target dimensions (defaults to true).",
                     example: true,
                   },
                 },
@@ -203,37 +210,53 @@ export const openApiSpec = {
           "200": {
             description: "Image transformation succeeded. Returns optimized binary image data.",
             headers: {
-              "X-Usage-Units": {
-                schema: { type: "integer", example: 1 },
-                description: "Metered billable units recorded for this transformation (1).",
+              "Content-Type": {
+                schema: { type: "string", example: "image/webp" },
+                description: "MIME type of output image.",
               },
-              "X-RateLimit-Limit-IP": {
-                schema: { type: "integer" },
-                description: "IP rate limit capacity (tokens/window).",
+              "Content-Length": {
+                schema: { type: "string", example: "45120" },
+                description: "Output image size in bytes.",
               },
-              "X-RateLimit-Remaining-IP": {
-                schema: { type: "integer" },
-                description: "Remaining IP rate limit allowance.",
+              "Content-Disposition": {
+                schema: { type: "string", example: 'inline; filename="transformed.webp"' },
+                description: "Content disposition header.",
               },
-              "X-RateLimit-Reset-IP": {
-                schema: { type: "integer" },
-                description: "Unix epoch timestamp when IP rate limit window resets.",
+              "Cache-Control": {
+                schema: { type: "string", example: "no-store" },
+                description: "Cache control policy.",
               },
-              "X-RateLimit-Limit-Key": {
-                schema: { type: "integer" },
-                description: "API Key rate limit capacity.",
-              },
-              "X-RateLimit-Remaining-Key": {
-                schema: { type: "integer" },
-                description: "Remaining API Key rate limit allowance.",
-              },
-              "X-RateLimit-Reset-Key": {
-                schema: { type: "integer" },
-                description: "Unix epoch timestamp when API Key rate limit resets.",
+              "X-Content-Type-Options": {
+                schema: { type: "string", example: "nosniff" },
+                description: "Security header preventing MIME sniffing.",
               },
               "X-Request-ID": {
                 schema: { type: "string" },
                 description: "Unique request correlation identifier.",
+              },
+              "X-Usage-Units": {
+                schema: { type: "string", example: "1" },
+                description: "Metered billable units recorded for this transformation (1).",
+              },
+              "X-Image-Width": {
+                schema: { type: "string", example: "800" },
+                description: "Output image width in pixels.",
+              },
+              "X-Image-Height": {
+                schema: { type: "string", example: "600" },
+                description: "Output image height in pixels.",
+              },
+              "X-RateLimit-Limit": {
+                schema: { type: "integer", example: 20 },
+                description: "Authenticated API key rate limit capacity (tokens).",
+              },
+              "X-RateLimit-Remaining": {
+                schema: { type: "integer", example: 19 },
+                description: "Remaining API key token allowance.",
+              },
+              "X-RateLimit-Reset": {
+                schema: { type: "integer", example: 1724500000 },
+                description: "Unix epoch timestamp in seconds when the rate limit window resets.",
               },
             },
             content: {
@@ -244,40 +267,40 @@ export const openApiSpec = {
             },
           },
           "400": {
-            description: "Bad Request — Invalid transformation parameters or malformed multipart.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            description: "Bad Request — Invalid transformation parameters, invalid Idempotency-Key format, or malformed multipart.",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "401": {
-            description: "Unauthorized — Missing, invalid, revoked, or expired API Key.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            description: "Unauthorized — Missing, invalid, revoked, or expired API Key ('Invalid API credentials.').",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "409": {
-            description: "Conflict — Duplicate request with identical Idempotency-Key.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            description: "Conflict — Duplicate request with identical Idempotency-Key within tenant.",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "413": {
             description: "Payload Too Large — Image file exceeds 10MB limit.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "415": {
-            description: "Unsupported Media Type — Image format is not supported.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            description: "Unsupported Media Type — Image format is not supported (only JPEG, PNG, WebP input).",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "422": {
             description: "Unprocessable Entity — Corrupt or unreadable image bytes.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "429": {
             description: "Too Many Requests — IP or API-Key rate limit capacity exhausted.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "500": {
             description: "Internal Server Error — Unexpected processing error.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
           "503": {
             description: "Service Unavailable — Distributed rate limiter or database temporarily unavailable.",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } },
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
           },
         },
       },
@@ -305,15 +328,28 @@ export const openApiSpec = {
       get: {
         summary: "Request-Path Readiness Check",
         description:
-          "Validates critical transformation request dependencies (PostgreSQL database read-check and Upstash Redis rate limiter ping) in parallel with a 2500ms timeout.",
+          "Validates critical transformation request dependencies (PostgreSQL database read check and Upstash Redis rate limiter ping) in parallel with driver-level timeouts. In production environments, requires Bearer authentication with HEALTHCHECK_SECRET.",
         operationId: "getReadiness",
-        security: [],
+        security: [
+          {},
+          {
+            HealthSecretAuth: [],
+          },
+        ],
         responses: {
           "200": {
             description: "All critical request-path dependencies are ready.",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthReadyResponse" },
+              },
+            },
+          },
+          "401": {
+            description: "Unauthorized — Missing or invalid HEALTHCHECK_SECRET in production.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ErrorEnvelope" },
               },
             },
           },
