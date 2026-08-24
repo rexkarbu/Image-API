@@ -1,5 +1,5 @@
 export const openApiSpec = {
-  openapi: "3.1.0",
+  openapi: "3.1.1",
   info: {
     title: "Image API Developer Platform",
     version: "1.0.0",
@@ -328,10 +328,9 @@ export const openApiSpec = {
       get: {
         summary: "Request-Path Readiness Check",
         description:
-          "Validates critical transformation request dependencies (PostgreSQL database read check and Upstash Redis rate limiter ping) in parallel with driver-level timeouts. In production environments, requires Bearer authentication with HEALTHCHECK_SECRET.",
+          "Validates critical transformation request dependencies (PostgreSQL database read check and Upstash Redis rate limiter ping) in parallel with driver-level timeouts. In production and preview environments, strictly requires Bearer authentication with HEALTHCHECK_SECRET. Local development and loopback test environments permit unauthenticated diagnostic probes.",
         operationId: "getReadiness",
         security: [
-          {},
           {
             HealthSecretAuth: [],
           },

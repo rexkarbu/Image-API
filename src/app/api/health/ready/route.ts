@@ -51,11 +51,11 @@ export async function GET(request: Request) {
   return withSpan(
     "health.ready",
     async (span) => {
-      // 2. Evaluate dependencies in parallel with strict validation
+      // 2. Evaluate dependencies in parallel with strict bounded checks
       const checkResult = await evaluateReadiness(
         {
-          queryDatabase: () => pool.query("SELECT 1 AS ready"),
-          pingRedis: () => getRedisClient().ping(),
+          pool,
+          redis: getRedisClient(),
         },
         2000
       );

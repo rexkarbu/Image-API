@@ -1,10 +1,70 @@
 import { describe, it, expect } from "vitest";
 import { openApiSpec } from "@/lib/openapi/spec";
-import { validateOpenApiSpec } from "@/scripts/openapi-check";
+import { validateOpenApiSpec, validateOpenApiDocument } from "@/scripts/openapi-check";
 
-describe("OpenAPI 3.1 Contract & Runtime Invariant Adversarial Tests", () => {
+describe("OpenAPI 3.1.1 Contract & Runtime Invariant Adversarial Tests", () => {
   it("proves canonical openApiSpec passes SwaggerParser schema and invariant validation", async () => {
     await expect(validateOpenApiSpec()).resolves.not.toThrow();
+  });
+
+  describe("Adversarial Schema Rejection Proofs", () => {
+    it("rejects invalid OpenAPI version (e.g. 3.0.0 or 3.1.0)", async () => {
+      const invalidVersionSpec = { ...openApiSpec, openapi: "3.1.0" };
+      await expect(validateOpenApiDocument(invalidVersionSpec as any)).rejects.toThrow(
+        /expected exact '3.1.1'/
+      );
+    });
+
+    it("rejects specification missing required info block", async () => {
+      const missingInfoSpec = { ...openApiSpec, info: undefined };
+      await expect(validateOpenApiDocument(missingInfoSpec as any)).rejects.toThrow(
+        /missing required info/
+      );
+    });
+
+    it("rejects specification missing required public paths", async () => {
+      const missingPathSpec = {
+        ...openApiSpec,
+        paths: {
+          "/v1/images/transform": openApiSpec.paths["/v1/images/transform"],
+        },
+      };
+      await expect(validateOpenApiDocument(missingPathSpec as any)).rejects.toThrow(
+        /missing required public path/
+      );
+    });
+
+    it("rejects specification leaking internal routes", async () => {
+      const leakedRouteSpec = {
+        ...openApiSpec,
+        paths: {
+          ...openApiSpec.paths,
+          "/api/webhooks/stripe": { post: { summary: "Internal Webhook" } },
+        },
+      };
+      await expect(validateOpenApiDocument(leakedRouteSpec as any)).rejects.toThrow(
+        /Internal route \/api\/webhooks\/stripe must NOT appear/
+      );
+    });
+
+    it("rejects optional security on /api/health/ready (must strictly require HealthSecretAuth)", async () => {
+      const optionalSecuritySpec = {
+        ...openApiSpec,
+        paths: {
+          ...openApiSpec.paths,
+          "/api/health/ready": {
+            ...openApiSpec.paths["/api/health/ready"],
+            get: {
+              ...openApiSpec.paths["/api/health/ready"].get,
+              security: [{}, { HealthSecretAuth: [] }],
+            },
+          },
+        },
+      };
+      await expect(validateOpenApiDocument(optionalSecuritySpec as any)).rejects.toThrow(
+        /security must strictly specify \[{ HealthSecretAuth: \[\] }\]/
+      );
+    });
   });
 
   describe("POST /v1/images/transform Contract Alignment", () => {

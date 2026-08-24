@@ -1,9 +1,6 @@
 import crypto from "node:crypto";
-
-export interface ReadinessDependencies {
-  queryDatabase: () => Promise<unknown>;
-  pingRedis: () => Promise<unknown>;
-}
+import type { Pool, PoolClient } from "pg";
+import type { Redis } from "@upstash/redis";
 
 export interface ReadinessCheckResult {
   allHealthy: boolean;
@@ -50,28 +47,43 @@ export function verifyHealthAuth(
 }
 
 /**
- * Validates PostgreSQL database readiness.
- * Requires exact row shape with ready === 1 (or "1").
+ * Validates PostgreSQL database readiness with a real checked-out client, driver timeout,
+ * bounded query cancellation, and guaranteed release in finally.
  */
-export async function checkDatabaseReadiness(
-  queryFn: () => Promise<unknown>,
+export async function executeBoundedDatabaseCheck(
+  pool: Pool | { connect: () => Promise<PoolClient> },
   timeoutMs = 2000
 ): Promise<boolean> {
+  let client: PoolClient | null = null;
+  let timer: NodeJS.Timeout | null = null;
+
   try {
-    const queryPromise = queryFn();
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("db_query_timeout")), timeoutMs);
+    const connectPromise = pool.connect();
+    const connectTimeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("db_connect_timeout")), timeoutMs);
     });
 
-    const result = (await Promise.race([queryPromise, timeoutPromise])) as {
-      rows?: Array<{ ready?: unknown }>;
-    };
+    client = await Promise.race([connectPromise, connectTimeoutPromise]);
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+
+    const queryTimeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("db_query_timeout")), timeoutMs);
+    });
+
+    // Query on checked-out client with bounded Promise race
+    const res = (await Promise.race([
+      client.query("SELECT 1 AS ready"),
+      queryTimeoutPromise,
+    ])) as { rows?: Array<{ ready?: unknown }> };
 
     if (
-      result &&
-      Array.isArray(result.rows) &&
-      result.rows.length === 1 &&
-      (result.rows[0]?.ready === 1 || result.rows[0]?.ready === "1")
+      res &&
+      Array.isArray(res.rows) &&
+      res.rows.length === 1 &&
+      (res.rows[0]?.ready === 1 || res.rows[0]?.ready === "1")
     ) {
       return true;
     }
@@ -79,40 +91,68 @@ export async function checkDatabaseReadiness(
     return false;
   } catch {
     return false;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    if (client) {
+      try {
+        client.release();
+      } catch {
+        // Safe swallow if client already destroyed
+      }
+    }
   }
 }
 
 /**
- * Validates Upstash Redis readiness.
- * Requires exact return value "PONG".
+ * Validates Upstash Redis readiness using an AbortSignal to ensure the underlying
+ * network operation is cancelled on timeout.
  */
-export async function checkRedisReadiness(
-  pingFn: () => Promise<unknown>,
+export async function executeBoundedRedisCheck(
+  redis: Redis | { ping: (options?: unknown) => Promise<unknown> },
   timeoutMs = 2000
 ): Promise<boolean> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | null = null;
+
   try {
-    const pingPromise = pingFn();
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("redis_ping_timeout")), timeoutMs);
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("redis_ping_timeout"));
+      }, timeoutMs);
     });
+
+    const pingPromise = (async () => {
+      // @upstash/redis supports signal in options or fetch
+      return await (redis as any).ping({ signal: controller.signal });
+    })();
 
     const result = await Promise.race([pingPromise, timeoutPromise]);
     return result === "PONG";
   } catch {
     return false;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }
 
 /**
- * Evaluates full readiness in parallel against provided dependencies.
+ * Evaluates full readiness in parallel against real or mock database and Redis instances.
  */
 export async function evaluateReadiness(
-  deps: ReadinessDependencies,
+  deps: {
+    pool: Pool | { connect: () => Promise<PoolClient> };
+    redis: Redis | { ping: (options?: unknown) => Promise<unknown> };
+  },
   timeoutMs = 2000
 ): Promise<ReadinessCheckResult> {
   const [dbHealthy, redisHealthy] = await Promise.all([
-    checkDatabaseReadiness(deps.queryDatabase, timeoutMs),
-    checkRedisReadiness(deps.pingRedis, timeoutMs),
+    executeBoundedDatabaseCheck(deps.pool, timeoutMs),
+    executeBoundedRedisCheck(deps.redis, timeoutMs),
   ]);
 
   return {

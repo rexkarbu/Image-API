@@ -84,13 +84,19 @@ export function redactSensitiveString(value: string): string {
   // 4. URLs with embedded credentials (user:pass@host)
   result = result.replace(/https?:\/\/[^:\s]+:[^@\s]+@[^\s]+/gi, "[REDACTED_URL]");
 
-  // 5. Emails
+  // 5. Sensitive query parameters in URLs (?token=..., ?key=..., ?signature=..., ?secret=..., &token=..., etc.)
+  result = result.replace(/([?&](?:token|key|secret|signature|apiKey|auth|password)=)[^&\s"']+/gi, "$1[REDACTED]");
+
+  // 6. Upstash REST token paths (e.g. /token_abc123 or endpoint paths)
+  result = result.replace(/https?:\/\/[^/]+\.upstash\.io\/[A-Za-z0-9_-]{20,}/gi, "[REDACTED_UPSTASH_URL]");
+
+  // 7. Emails
   result = result.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[REDACTED_EMAIL]");
 
-  // 6. Session and cookie tokens
-  result = result.replace(/(?:session|token|auth)=[^;\s]+/gi, "[REDACTED_COOKIE]");
+  // 8. Session and cookie tokens
+  result = result.replace(/(?:session|token|auth|key|secret)=[^;\s"']+/gi, "[REDACTED_COOKIE]");
 
-  // 7. Long 64-char hex strings (raw hashes / keys)
+  // 9. Long 64-char hex strings (raw hashes / secrets)
   result = result.replace(/\b[0-9a-f]{64}\b/gi, "[REDACTED_HASH]");
 
   return result.length > 500 ? result.slice(0, 500) + "... [Truncated]" : result;

@@ -38,40 +38,63 @@ describe("Observability Logger & Request ID Sanitization Adversarial Tests", () 
     });
   });
 
-  describe("redactSensitiveString", () => {
-    it("redacts credentials and sensitive tokens embedded anywhere in strings", () => {
+  describe("redactSensitiveString Sub-string Sanitization", () => {
+    it("redacts credentials, URLs with params, and secrets embedded anywhere in strings", () => {
       const tests = [
         {
-          input: "User authorization header is Authorization: Bearer img_live_abcdef1234567890",
+          name: "Bearer token in authorization header",
+          input: "Authorization: Bearer img_live_abcdef1234567890",
           expectedNotToContain: "img_live_abcdef1234567890",
         },
         {
-          input: "Received webhook with signature whsec_abcdef1234567890 for customer",
-          expectedNotToContain: "whsec_abcdef1234567890",
-        },
-        {
+          name: "Stripe secret key in exception text",
           input: "Stripe error using key sk_test_51MockSecretKey1234567890",
           expectedNotToContain: "sk_test_51MockSecretKey1234567890",
         },
         {
+          name: "Webhook signing secret in log",
+          input: "Received webhook with signature whsec_abcdef1234567890 for customer",
+          expectedNotToContain: "whsec_abcdef1234567890",
+        },
+        {
+          name: "PostgreSQL connection string with credentials",
           input: "Database URL: postgresql://admin:secretPass123@ep-neon.tech/db?sslmode=verify-full",
           expectedNotToContain: "secretPass123",
         },
         {
+          name: "Redis connection string with credentials",
           input: "Redis URL: rediss://default:redisToken999@us1.upstash.io:6379",
           expectedNotToContain: "redisToken999",
         },
         {
+          name: "URL with embedded user:pass",
           input: "Fetch url: https://user:pass123@api.internal.net/sync",
           expectedNotToContain: "pass123",
         },
         {
+          name: "URL with sensitive query parameters",
+          input: "Redirecting to https://callback.net/oauth?token=my_secret_token_123&key=my_key_999&signature=sig_abc_123",
+          expectedNotToContain: "my_secret_token_123",
+        },
+        {
+          name: "Upstash REST token path",
+          input: "Upstash endpoint: https://ap-southeast-1.upstash.io/AX34kldjfnv98347kldfjs893475",
+          expectedNotToContain: "AX34kldjfnv98347kldfjs893475",
+        },
+        {
+          name: "User email address",
           input: "Notification sent to user customer.support@company.org in tenant",
           expectedNotToContain: "customer.support@company.org",
         },
         {
+          name: "Cookie header with session token",
           input: "Cookie header: session=sess_token_987654321; other=123",
           expectedNotToContain: "sess_token_987654321",
+        },
+        {
+          name: "Raw 64-char hexadecimal secret / hash",
+          input: "Secret key: a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          expectedNotToContain: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
         },
       ];
 
@@ -83,7 +106,7 @@ describe("Observability Logger & Request ID Sanitization Adversarial Tests", () 
   });
 
   describe("Captured Serialized JSON Logs Secret Absence Proof", () => {
-    it("proves that console.info outputs serialized JSON without fixture secrets", () => {
+    it("proves that console output contains zero fixture secrets across nested objects, arrays, and thrown strings", () => {
       const consoleSpy = vi.spyOn(console, "info").mockImplementation(() => {});
 
       const fixtureSecrets = {
@@ -91,10 +114,12 @@ describe("Observability Logger & Request ID Sanitization Adversarial Tests", () 
         stripeSecret: "sk_test_51SecretStripeKey999888777",
         webhookSecret: "whsec_super_secret_webhook_signature_token",
         postgresUri: "postgres://neondb_owner:NeonSecretPassword123@ep-cold-lake.us-east-2.aws.neon.tech/neondb",
-        redisUri: "https://upstash.io/token_abc123_very_secret",
+        redisUrlWithParam: "https://upstash.io/query?token=upstash_secret_token_abc&key=secret_key_123",
         userEmail: "ceo@enterprise-client.com",
         bearerToken: "Bearer img_live_super_secret_test_key_12345678",
         hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        cookie: "session=sess_secret_cookie_token_999",
+        thrownString: "Fatal error on https://user:super_secret_pw@internal.db/sync",
       };
 
       logger.info("transform.completed", {
@@ -108,12 +133,24 @@ describe("Observability Logger & Request ID Sanitization Adversarial Tests", () 
           format: "webp",
           width: 800,
           height: 600,
-          meta1: `Header ${fixtureSecrets.bearerToken}`,
-          meta2: `Stripe ${fixtureSecrets.stripeSecret}`,
-          meta3: `Webhook ${fixtureSecrets.webhookSecret}`,
-          meta4: `Database ${fixtureSecrets.postgresUri}`,
-          meta5: `Email ${fixtureSecrets.userEmail}`,
-          meta6: fixtureSecrets.hash,
+          nested: {
+            deep: {
+              auth: fixtureSecrets.bearerToken,
+              stripe: fixtureSecrets.stripeSecret,
+              webhook: fixtureSecrets.webhookSecret,
+              postgres: fixtureSecrets.postgresUri,
+              redisQuery: fixtureSecrets.redisUrlWithParam,
+              email: fixtureSecrets.userEmail,
+              hash: fixtureSecrets.hash,
+              cookie: fixtureSecrets.cookie,
+              thrown: fixtureSecrets.thrownString,
+            },
+            arrayValues: [
+              `Token ${fixtureSecrets.apiKey}`,
+              fixtureSecrets.postgresUri,
+              fixtureSecrets.userEmail,
+            ],
+          },
         },
       });
 
@@ -133,7 +170,11 @@ describe("Observability Logger & Request ID Sanitization Adversarial Tests", () 
       expect(loggedJsonString).not.toContain("SecretStripeKey");
       expect(loggedJsonString).not.toContain("super_secret_webhook");
       expect(loggedJsonString).not.toContain("NeonSecretPassword123");
+      expect(loggedJsonString).not.toContain("upstash_secret_token_abc");
+      expect(loggedJsonString).not.toContain("secret_key_123");
       expect(loggedJsonString).not.toContain("ceo@enterprise-client.com");
+      expect(loggedJsonString).not.toContain("sess_secret_cookie_token_999");
+      expect(loggedJsonString).not.toContain("super_secret_pw");
       expect(loggedJsonString).not.toContain(fixtureSecrets.hash);
 
       consoleSpy.mockRestore();

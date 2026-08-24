@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -38,7 +39,7 @@ jobs:
       - name: Audit Production Dependencies
         run: pnpm audit --prod
 
-      - name: Validate OpenAPI 3.1 Specification
+      - name: Validate OpenAPI 3.1.1 Specification
         run: pnpm openapi:check
 
       - name: Lint Codebase

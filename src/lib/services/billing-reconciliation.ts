@@ -41,8 +41,6 @@ export async function runReconciliationForOrganization(
   return withSpan(
     "billing.reconcile",
     async (span) => {
-      span.setAttribute("billing.organization_id", organizationId);
-
       const [sub] = await client
         .select()
         .from(billingSubscriptions)

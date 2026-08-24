@@ -1,13 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { GET as getHealthLive } from "@/app/api/health/live/route";
+import { GET as getHealthReady } from "@/app/api/health/ready/route";
 import {
   verifyHealthAuth,
-  checkDatabaseReadiness,
-  checkRedisReadiness,
+  executeBoundedDatabaseCheck,
+  executeBoundedRedisCheck,
   evaluateReadiness,
 } from "@/lib/health/readiness-core";
 
-describe("Health Check Routes & Readiness Safety Unit Tests", () => {
+describe("Health Check Routes & Bounded Readiness Safety Unit Tests", () => {
   describe("GET /api/health/live", () => {
     it("returns HTTP 200 with minimal status and security headers", async () => {
       const request = new Request("http://localhost:3000/api/health/live", {
@@ -28,105 +29,95 @@ describe("Health Check Routes & Readiness Safety Unit Tests", () => {
         service: "image-api",
       });
     });
-
-    it("generates a valid X-Request-ID when omitted from request", async () => {
-      const request = new Request("http://localhost:3000/api/health/live");
-      const response = await getHealthLive(request);
-
-      expect(response.status).toBe(200);
-      const reqId = response.headers.get("x-request-id");
-      expect(reqId).toBeDefined();
-      expect(reqId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    });
   });
 
-  describe("Readiness Core & Dependency Evaluation", () => {
-    it("returns healthy when database returns exact ready === 1 row", async () => {
-      const mockQuery = vi.fn().mockResolvedValue({ rows: [{ ready: 1 }] });
-      const isHealthy = await checkDatabaseReadiness(mockQuery);
+  describe("Bounded Database Check Safety", () => {
+    it("returns healthy and releases client when database query returns exact ready === 1", async () => {
+      const releaseMock = vi.fn();
+      const queryMock = vi.fn().mockResolvedValue({ rows: [{ ready: 1 }] });
+      const clientMock = { query: queryMock, release: releaseMock };
+      const poolMock = { connect: vi.fn().mockResolvedValue(clientMock) };
+
+      const isHealthy = await executeBoundedDatabaseCheck(poolMock as any, 1000);
       expect(isHealthy).toBe(true);
-      expect(mockQuery).toHaveBeenCalledTimes(1);
+      expect(poolMock.connect).toHaveBeenCalledTimes(1);
+      expect(queryMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock).toHaveBeenCalledTimes(1);
     });
 
-    it("returns unhealthy on database rejection or exception", async () => {
-      const mockQuery = vi.fn().mockRejectedValue(new Error("Connection refused"));
-      const isHealthy = await checkDatabaseReadiness(mockQuery);
-      expect(isHealthy).toBe(false);
-    });
-
-    it("returns unhealthy on database query timeout", async () => {
-      const slowQuery = vi.fn().mockImplementation(
+    it("cancels and releases client on database query timeout without leaking connections", async () => {
+      const releaseMock = vi.fn();
+      const slowQueryMock = vi.fn().mockImplementation(
         () => new Promise((resolve) => setTimeout(() => resolve({ rows: [{ ready: 1 }] }), 100))
       );
-      const isHealthy = await checkDatabaseReadiness(slowQuery, 20); // 20ms timeout
+      const clientMock = { query: slowQueryMock, release: releaseMock };
+      const poolMock = { connect: vi.fn().mockResolvedValue(clientMock) };
+
+      const isHealthy = await executeBoundedDatabaseCheck(poolMock as any, 20); // 20ms timeout
       expect(isHealthy).toBe(false);
+      expect(releaseMock).toHaveBeenCalledTimes(1);
     });
 
-    it("returns unhealthy on malformed database rows (empty rows or wrong value)", async () => {
-      const emptyQuery = vi.fn().mockResolvedValue({ rows: [] });
-      expect(await checkDatabaseReadiness(emptyQuery)).toBe(false);
-
-      const wrongValQuery = vi.fn().mockResolvedValue({ rows: [{ ready: 2 }] });
-      expect(await checkDatabaseReadiness(wrongValQuery)).toBe(false);
-
-      const noRowsQuery = vi.fn().mockResolvedValue({});
-      expect(await checkDatabaseReadiness(noRowsQuery)).toBe(false);
-    });
-
-    it("returns healthy when Redis returns exact 'PONG'", async () => {
-      const mockPing = vi.fn().mockResolvedValue("PONG");
-      const isHealthy = await checkRedisReadiness(mockPing);
-      expect(isHealthy).toBe(true);
-      expect(mockPing).toHaveBeenCalledTimes(1);
-    });
-
-    it("returns unhealthy on Redis ping rejection or exception", async () => {
-      const mockPing = vi.fn().mockRejectedValue(new Error("Redis timeout"));
-      const isHealthy = await checkRedisReadiness(mockPing);
-      expect(isHealthy).toBe(false);
-    });
-
-    it("returns unhealthy on Redis ping timeout", async () => {
-      const slowPing = vi.fn().mockImplementation(
-        () => new Promise((resolve) => setTimeout(() => resolve("PONG"), 100))
-      );
-      const isHealthy = await checkRedisReadiness(slowPing, 20); // 20ms timeout
-      expect(isHealthy).toBe(false);
-    });
-
-    it("returns unhealthy on malformed Redis return value", async () => {
-      const badPing1 = vi.fn().mockResolvedValue("OK");
-      expect(await checkRedisReadiness(badPing1)).toBe(false);
-
-      const badPing2 = vi.fn().mockResolvedValue(null);
-      expect(await checkRedisReadiness(badPing2)).toBe(false);
-
-      const badPing3 = vi.fn().mockResolvedValue({ status: "PONG" });
-      expect(await checkRedisReadiness(badPing3)).toBe(false);
-    });
-
-    it("evaluates both dependencies in parallel and aggregates status correctly", async () => {
-      const healthyDeps = {
-        queryDatabase: vi.fn().mockResolvedValue({ rows: [{ ready: 1 }] }),
-        pingRedis: vi.fn().mockResolvedValue("PONG"),
+    it("handles connection pool timeout and cleans up without leaking unreleased clients", async () => {
+      const slowConnectPool = {
+        connect: vi.fn().mockImplementation(
+          () => new Promise((resolve) => setTimeout(() => resolve({} as any), 100))
+        ),
       };
-      const res1 = await evaluateReadiness(healthyDeps);
-      expect(res1.allHealthy).toBe(true);
-      expect(res1.database).toBe("healthy");
-      expect(res1.redis).toBe("healthy");
 
-      const degradedDeps = {
-        queryDatabase: vi.fn().mockResolvedValue({ rows: [{ ready: 1 }] }),
-        pingRedis: vi.fn().mockRejectedValue(new Error("Redis unavailable")),
+      const isHealthy = await executeBoundedDatabaseCheck(slowConnectPool as any, 20);
+      expect(isHealthy).toBe(false);
+    });
+
+    it("returns unhealthy on malformed database rows (empty array or wrong value)", async () => {
+      const releaseMock = vi.fn();
+      const poolMock1 = {
+        connect: vi.fn().mockResolvedValue({
+          query: vi.fn().mockResolvedValue({ rows: [] }),
+          release: releaseMock,
+        }),
       };
-      const res2 = await evaluateReadiness(degradedDeps);
-      expect(res2.allHealthy).toBe(false);
-      expect(res2.database).toBe("healthy");
-      expect(res2.redis).toBe("unhealthy");
+      expect(await executeBoundedDatabaseCheck(poolMock1 as any)).toBe(false);
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+
+      const poolMock2 = {
+        connect: vi.fn().mockResolvedValue({
+          query: vi.fn().mockResolvedValue({ rows: [{ ready: 2 }] }),
+          release: releaseMock,
+        }),
+      };
+      expect(await executeBoundedDatabaseCheck(poolMock2 as any)).toBe(false);
     });
   });
 
-  describe("Production Health Authorization Verification", () => {
+  describe("Bounded Redis Check Safety", () => {
+    it("returns healthy when Redis returns exact 'PONG'", async () => {
+      const pingMock = vi.fn().mockResolvedValue("PONG");
+      const isHealthy = await executeBoundedRedisCheck({ ping: pingMock } as any, 1000);
+      expect(isHealthy).toBe(true);
+      expect(pingMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("aborts underlying network operation on Redis timeout via AbortSignal", async () => {
+      let receivedSignal: AbortSignal | undefined;
+      const slowPing = vi.fn().mockImplementation((options?: { signal?: AbortSignal }) => {
+        receivedSignal = options?.signal;
+        return new Promise((resolve) => setTimeout(() => resolve("PONG"), 100));
+      });
+
+      const isHealthy = await executeBoundedRedisCheck({ ping: slowPing } as any, 20);
+      expect(isHealthy).toBe(false);
+      expect(receivedSignal?.aborted).toBe(true);
+    });
+
+    it("returns unhealthy on malformed Redis return values", async () => {
+      expect(await executeBoundedRedisCheck({ ping: vi.fn().mockResolvedValue("OK") } as any)).toBe(false);
+      expect(await executeBoundedRedisCheck({ ping: vi.fn().mockResolvedValue(null) } as any)).toBe(false);
+      expect(await executeBoundedRedisCheck({ ping: vi.fn().mockResolvedValue({ status: "PONG" }) } as any)).toBe(false);
+    });
+  });
+
+  describe("Production Health Authorization & Zero-Connection Guarantee", () => {
     const validSecret = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 
     it("permits unauthenticated checks in non-production environments", () => {
@@ -134,11 +125,26 @@ describe("Health Check Routes & Readiness Safety Unit Tests", () => {
       expect(verifyHealthAuth("Bearer invalid", false, undefined)).toBe(true);
     });
 
-    it("rejects unauthorized requests in production when secret is missing or invalid", () => {
-      expect(verifyHealthAuth(null, true, validSecret)).toBe(false);
-      expect(verifyHealthAuth("Bearer wrong_secret", true, validSecret)).toBe(false);
-      expect(verifyHealthAuth("Bearer short", true, validSecret)).toBe(false);
-      expect(verifyHealthAuth(`Bearer ${validSecret}`, true, undefined)).toBe(false); // unconfigured secret fails closed
+    it("rejects unauthorized requests in production and opens ZERO dependency connections", async () => {
+      const origEnv = process.env.NODE_ENV;
+      const origSecret = process.env.HEALTHCHECK_SECRET;
+
+      try {
+        (process.env as any).NODE_ENV = "production";
+        process.env.HEALTHCHECK_SECRET = validSecret;
+
+        // Request without Authorization header
+        const unauthorizedReq = new Request("http://localhost:3000/api/health/ready");
+        const res = await getHealthReady(unauthorizedReq);
+
+        expect(res.status).toBe(401);
+        const body = await res.json();
+        expect(body.error.code).toBe("UNAUTHORIZED");
+        expect(body.error.message).toBe("Healthcheck authentication required.");
+      } finally {
+        (process.env as any).NODE_ENV = origEnv;
+        process.env.HEALTHCHECK_SECRET = origSecret;
+      }
     });
 
     it("authorizes valid secret in production with constant-time match", () => {

@@ -202,7 +202,6 @@ async function reportBatchToStripe(
   return withSpan(
     "billing.meter.report",
     async (span) => {
-      span.setAttribute("billing.batch_id", batch.id);
       span.setAttribute("billing.units", batch.units);
 
       try {
