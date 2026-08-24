@@ -46,7 +46,8 @@ function getDatabasePool(): Pool {
 
   const poolInstance = new Pool({
     connectionString: connString,
-    connectionTimeoutMillis: 5000,
+    max: 20,
+    connectionTimeoutMillis: 30000,
   });
 
   if (process.env.NODE_ENV !== "production") {

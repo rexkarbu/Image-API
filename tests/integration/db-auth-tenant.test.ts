@@ -105,8 +105,6 @@ describe("Live PostgreSQL Integration Tests (Auth, Multi-Tenancy & API-Key Lifec
       }
     } catch (err) {
       console.error("⚠️ Failed to clean up integration test fixture rows:", (err as Error).message);
-    } finally {
-      await pool.end();
     }
   });
 
