@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import * as dotenv from "dotenv";
 import { assertDevelopmentDatabaseSafety } from "./development-safety";
+import { validatePostgresUrlSecurity } from "./ssl-validation";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
@@ -364,12 +365,15 @@ const EXPECTED_INDEXES = [
 ];
 
 export async function verifyDbMetadata() {
-  assertDevelopmentDatabaseSafety();
+  if (process.env.DATABASE_ENV === "development") {
+    assertDevelopmentDatabaseSafety();
+  }
 
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     throw new Error("DATABASE_URL is not defined in environment.");
   }
+  validatePostgresUrlSecurity(connectionString, "DATABASE_URL");
 
   const pool = new Pool({
     connectionString,

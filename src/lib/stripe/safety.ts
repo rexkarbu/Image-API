@@ -15,6 +15,7 @@ export type { ValidatedStripeConfig, StripeMeterObjectLike, StripePriceObjectLik
  */
 export function getValidatedStripeConfig(options?: {
   requireIntegrationTestOptIn?: boolean;
+  allowOptionalWebhookSecret?: boolean;
 }): ValidatedStripeConfig {
   return validateStripeEnv(process.env, options);
 }

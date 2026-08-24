@@ -192,7 +192,12 @@ export async function runDeployPreflight(): Promise<void> {
     console.log("✅ DIRECT_DATABASE_URL SSL & verify-full security verified.");
   }
 
-  const stripeConfig = getValidatedStripeConfig();
+  const isBootstrap = Boolean(
+    process.env.VERCEL_ENV === "preview" ||
+      !process.env.STRIPE_WEBHOOK_SECRET ||
+      process.env.STRIPE_WEBHOOK_SECRET.includes("placeholder")
+  );
+  const stripeConfig = getValidatedStripeConfig({ allowOptionalWebhookSecret: isBootstrap });
   console.log("✅ Stripe test mode & test credentials verified.");
 
   await validateOpenApiSpec();

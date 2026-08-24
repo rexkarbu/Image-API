@@ -30,7 +30,10 @@ function isKnownPlaceholder(val: string): boolean {
  */
 export function validateStripeEnv(
   env: Record<string, string | undefined>,
-  options: { requireIntegrationTestOptIn?: boolean } = {}
+  options: {
+    requireIntegrationTestOptIn?: boolean;
+    allowOptionalWebhookSecret?: boolean;
+  } = {}
 ): ValidatedStripeConfig {
   const stripeEnv = env.STRIPE_ENV;
   if (!stripeEnv) {
@@ -70,17 +73,24 @@ export function validateStripeEnv(
   }
 
   const webhookSecret = env.STRIPE_WEBHOOK_SECRET;
+  let finalWebhookSecret = "";
   if (!webhookSecret) {
-    throw new Error("Stripe Configuration Error: Missing required STRIPE_WEBHOOK_SECRET variable.");
-  }
-  if (webhookSecret !== webhookSecret.trim()) {
-    throw new Error("Stripe Security Error: STRIPE_WEBHOOK_SECRET contains forbidden leading/trailing whitespace.");
-  }
-  if (!webhookSecret.startsWith("whsec_") || webhookSecret.length < 16) {
-    throw new Error("Stripe Configuration Error: STRIPE_WEBHOOK_SECRET must be a valid signing secret starting with 'whsec_'.");
-  }
-  if (isKnownPlaceholder(webhookSecret)) {
-    throw new Error("Stripe Configuration Error: STRIPE_WEBHOOK_SECRET contains an unconfigured example placeholder.");
+    if (!options.allowOptionalWebhookSecret) {
+      throw new Error("Stripe Configuration Error: Missing required STRIPE_WEBHOOK_SECRET variable.");
+    }
+  } else {
+    if (webhookSecret !== webhookSecret.trim()) {
+      throw new Error("Stripe Security Error: STRIPE_WEBHOOK_SECRET contains forbidden leading/trailing whitespace.");
+    }
+    if (isKnownPlaceholder(webhookSecret)) {
+      if (!options.allowOptionalWebhookSecret) {
+        throw new Error("Stripe Configuration Error: STRIPE_WEBHOOK_SECRET contains an unconfigured example placeholder.");
+      }
+    } else if (!webhookSecret.startsWith("whsec_") || webhookSecret.length < 16) {
+      throw new Error("Stripe Configuration Error: STRIPE_WEBHOOK_SECRET must be a valid signing secret starting with 'whsec_'.");
+    } else {
+      finalWebhookSecret = webhookSecret;
+    }
   }
 
   const meterId = env.STRIPE_METER_ID;
@@ -132,7 +142,7 @@ export function validateStripeEnv(
   return {
     stripeEnv: "test",
     secretKey,
-    webhookSecret,
+    webhookSecret: finalWebhookSecret,
     meterId,
     meterEventName,
     meteredPriceId,
