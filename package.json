@@ -30,6 +30,11 @@
     "health:check": "tsx src/scripts/health-check-cli.ts"
   },
   "packageManager": "pnpm@9.15.4",
+  "pnpm": {
+    "overrides": {
+      "esbuild": "^0.25.0"
+    }
+  },
   "engines": {
     "node": ">=20.9.0",
     "pnpm": ">=9.0.0"
