@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import type { Redis } from "@upstash/redis";
+import { Redis } from "@upstash/redis";
+import { getValidatedRedisConfig, type RedisSafetyEnv } from "@/lib/ratelimit/redis-safety-core";
 
 export interface ReadinessCheckResult {
   allHealthy: boolean;
@@ -47,37 +48,54 @@ export function verifyHealthAuth(
 }
 
 /**
- * Validates PostgreSQL database readiness with a real checked-out client, driver timeout,
- * bounded query cancellation, and guaranteed release in finally.
+ * Validates PostgreSQL database readiness with real connection and query timeout bounds.
+ * If timeout occurs, the client is destroyed rather than returned to the reusable pool.
+ * If connect() resolves late after a timeout, the late client is immediately destroyed.
  */
 export async function executeBoundedDatabaseCheck(
   pool: Pool | { connect: () => Promise<PoolClient> },
   timeoutMs = 2000
 ): Promise<boolean> {
-  let client: PoolClient | null = null;
+  let isTimedOut = false;
+  let acquiredClient: PoolClient | null = null;
   let timer: NodeJS.Timeout | null = null;
 
   try {
-    const connectPromise = pool.connect();
-    const connectTimeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("db_connect_timeout")), timeoutMs);
+    const connectPromise = pool.connect().then((client) => {
+      if (isTimedOut) {
+        // Late resolution after timeout: destroy client immediately
+        try {
+          (client as any).release(true);
+        } catch {
+          // Safe ignore
+        }
+        return null;
+      }
+      acquiredClient = client;
+      return client;
     });
 
-    client = await Promise.race([connectPromise, connectTimeoutPromise]);
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        isTimedOut = true;
+        reject(new Error("db_readiness_timeout"));
+      }, timeoutMs);
+    });
+
+    // Attach rejection handler to prevent unhandled rejection
+    connectPromise.catch(() => {});
+
+    const client = await Promise.race([connectPromise, timeoutPromise]);
+    if (!client) {
+      return false;
     }
 
-    const queryTimeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("db_query_timeout")), timeoutMs);
-    });
+    const queryPromise = (client as any).query("SELECT 1 AS ready");
+    queryPromise.catch(() => {});
 
-    // Query on checked-out client with bounded Promise race
-    const res = (await Promise.race([
-      client.query("SELECT 1 AS ready"),
-      queryTimeoutPromise,
-    ])) as { rows?: Array<{ ready?: unknown }> };
+    const res = (await Promise.race([queryPromise, timeoutPromise])) as {
+      rows?: Array<{ ready?: unknown }>;
+    };
 
     if (
       res &&
@@ -85,74 +103,77 @@ export async function executeBoundedDatabaseCheck(
       res.rows.length === 1 &&
       (res.rows[0]?.ready === 1 || res.rows[0]?.ready === "1")
     ) {
+      // Valid query completed within bounds: release normally
+      acquiredClient = null;
+      client.release();
       return true;
     }
 
+    // Malformed query result: destroy client
+    acquiredClient = null;
+    (client as any).release(true);
     return false;
   } catch {
+    // Timeout or error: destroy acquired client so no corrupted connection returns to pool
+    if (acquiredClient) {
+      try {
+        (acquiredClient as any).release(true);
+      } catch {
+        // Safe ignore
+      }
+      acquiredClient = null;
+    }
     return false;
   } finally {
     if (timer) {
       clearTimeout(timer);
     }
-    if (client) {
-      try {
-        client.release();
-      } catch {
-        // Safe swallow if client already destroyed
-      }
-    }
   }
 }
 
 /**
- * Validates Upstash Redis readiness using an AbortSignal to ensure the underlying
- * network operation is cancelled on timeout.
+ * Creates a dedicated bounded Upstash Redis client using the official constructor signal factory.
+ */
+export function createBoundedRedisClient(
+  timeoutMs = 2000,
+  env: RedisSafetyEnv = process.env
+): Redis {
+  const config = getValidatedRedisConfig(env);
+  return new Redis({
+    url: config.restUrl,
+    token: config.restToken,
+    signal: () => AbortSignal.timeout(timeoutMs),
+  });
+}
+
+/**
+ * Validates Upstash Redis readiness using the official Upstash Redis client with constructor-level signal.
+ * Calls ping() with zero arguments.
  */
 export async function executeBoundedRedisCheck(
-  redis: Redis | { ping: (options?: unknown) => Promise<unknown> },
-  timeoutMs = 2000
+  redis: Redis | { ping: () => Promise<unknown> }
 ): Promise<boolean> {
-  const controller = new AbortController();
-  let timer: NodeJS.Timeout | null = null;
-
   try {
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new Error("redis_ping_timeout"));
-      }, timeoutMs);
-    });
-
-    const pingPromise = (async () => {
-      // @upstash/redis supports signal in options or fetch
-      return await (redis as any).ping({ signal: controller.signal });
-    })();
-
-    const result = await Promise.race([pingPromise, timeoutPromise]);
+    const result = await redis.ping();
     return result === "PONG";
   } catch {
     return false;
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
   }
 }
 
 /**
- * Evaluates full readiness in parallel against real or mock database and Redis instances.
+ * Evaluates full readiness in parallel against database pool and bounded Redis client.
  */
 export async function evaluateReadiness(
   deps: {
     pool: Pool | { connect: () => Promise<PoolClient> };
-    redis: Redis | { ping: (options?: unknown) => Promise<unknown> };
+    redis: Redis | { ping: () => Promise<unknown> };
   },
   timeoutMs = 2000
 ): Promise<ReadinessCheckResult> {
   const [dbHealthy, redisHealthy] = await Promise.all([
     executeBoundedDatabaseCheck(deps.pool, timeoutMs),
-    executeBoundedRedisCheck(deps.redis, timeoutMs),
+    executeBoundedRedisCheck(deps.redis),
   ]);
 
   return {

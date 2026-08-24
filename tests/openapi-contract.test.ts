@@ -7,7 +7,63 @@ describe("OpenAPI 3.1.1 Contract & Runtime Invariant Adversarial Tests", () => {
     await expect(validateOpenApiSpec()).resolves.not.toThrow();
   });
 
-  describe("Adversarial Schema Rejection Proofs", () => {
+  describe("Formal OpenAPI 3.1.1 Structural Validator Rejection Proofs", () => {
+    it("proves formal validator rejects a document with truthy numeric info.title (which passes basic truthy checks)", async () => {
+      const numericTitleSpec = {
+        ...openApiSpec,
+        info: {
+          ...openApiSpec.info,
+          title: 123456 as any, // Truthy number
+        },
+      };
+      await expect(validateOpenApiDocument(numericTitleSpec as any)).rejects.toThrow(
+        /Swagger schema validation failed|must be string/i
+      );
+    });
+
+    it("proves formal validator rejects a document with numeric response description (which passes basic truthy checks)", async () => {
+      const numericDescSpec = {
+        ...openApiSpec,
+        paths: {
+          ...openApiSpec.paths,
+          "/api/health/live": {
+            ...openApiSpec.paths["/api/health/live"],
+            get: {
+              ...openApiSpec.paths["/api/health/live"].get,
+              responses: {
+                "200": {
+                  description: 200 as any, // Truthy number
+                },
+              },
+            },
+          },
+        },
+      };
+      await expect(validateOpenApiDocument(numericDescSpec as any)).rejects.toThrow(
+        /Swagger schema validation failed|must be string/i
+      );
+    });
+
+    it("proves formal validator rejects an invalid security scheme type", async () => {
+      const invalidSecuritySpec = {
+        ...openApiSpec,
+        components: {
+          ...openApiSpec.components,
+          securitySchemes: {
+            ...openApiSpec.components.securitySchemes,
+            BearerAuth: {
+              type: "invalid_unsupported_scheme_type",
+            },
+          },
+        },
+      };
+      await expect(validateOpenApiDocument(invalidSecuritySpec as any)).rejects.toThrow(
+        /Swagger schema validation failed|must match/i
+      );
+    });
+  });
+
+  describe("Adversarial Invariant Rejection Proofs", () => {
     it("rejects invalid OpenAPI version (e.g. 3.0.0 or 3.1.0)", async () => {
       const invalidVersionSpec = { ...openApiSpec, openapi: "3.1.0" };
       await expect(validateOpenApiDocument(invalidVersionSpec as any)).rejects.toThrow(

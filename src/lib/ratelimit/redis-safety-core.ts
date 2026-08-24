@@ -282,6 +282,27 @@ export function validateDevelopmentRedisSafety(
   };
 }
 
+export function getValidatedRedisConfig(env: RedisSafetyEnv = process.env): {
+  restUrl: string;
+  restToken: string;
+} {
+  const url = env.UPSTASH_REDIS_REST_URL;
+  const token = env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (!url || url.trim() === "" || !token || token.trim() === "") {
+    throw new Error(
+      "Safety Check Failed: UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are required."
+    );
+  }
+
+  validateUpstashRestUrl(url);
+
+  return {
+    restUrl: url,
+    restToken: token,
+  };
+}
+
 export function assertRedisDevelopmentSafety(env: RedisSafetyEnv = process.env): void {
   validateDevelopmentRedisSafety(env);
 }

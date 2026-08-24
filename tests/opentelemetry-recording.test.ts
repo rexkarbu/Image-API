@@ -137,8 +137,7 @@ describe("OpenTelemetry SafeSpan Facade & Fail-Closed Observability Tests", () =
     expect(normalizeErrorCode("arbitrary thrown string")).toBe("INTERNAL_ERROR");
 
     const sanitized = sanitizeException(errorWithSecret) as Error;
-    expect(sanitized.name).toBe("CustomDatabaseError");
-    expect(sanitized.message).not.toContain("SecretPassword123");
+    expect(sanitized.name).toBe("POSTGRES_TIMEOUT");
     expect(sanitized.message).toBe("POSTGRES_TIMEOUT");
 
     await expect(
@@ -157,7 +156,49 @@ describe("OpenTelemetry SafeSpan Facade & Fail-Closed Observability Tests", () =
 
     const exEvent = failedSpan.events.find((e) => e.name === "exception");
     expect(exEvent).toBeDefined();
+    expect(exEvent!.attributes?.["exception.message"]).toBe("POSTGRES_TIMEOUT");
     expect(exEvent!.attributes?.["exception.message"]).not.toContain("SecretPassword123");
+  });
+
+  it("proves custom secret strings with no standard keywords never reach exported span exceptions", async () => {
+    const unkeywordedSecret = "UNRECOGNIZED_PRIVATE_PAYLOAD_984729482934";
+    const customError = new Error(`Unexpected failure with data: ${unkeywordedSecret}`);
+
+    expect(normalizeErrorCode(customError)).toBe("INTERNAL_ERROR");
+
+    const sanitized = sanitizeException(customError) as Error;
+    expect(sanitized.message).toBe("INTERNAL_ERROR");
+    expect(sanitized.name).toBe("INTERNAL_ERROR");
+
+    await expect(
+      withSpan("custom.failing.step", async () => {
+        throw customError;
+      })
+    ).rejects.toThrow();
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans.length).toBe(1);
+
+    const failedSpan = spans[0];
+    expect(failedSpan.status.code).toBe(2);
+    expect(failedSpan.status.message).toBe("INTERNAL_ERROR");
+    expect(failedSpan.attributes["error.type"]).toBe("INTERNAL_ERROR");
+
+    const exEvent = failedSpan.events.find((e) => e.name === "exception");
+    expect(exEvent).toBeDefined();
+    expect(exEvent!.attributes?.["exception.message"]).toBe("INTERNAL_ERROR");
+    expect(exEvent!.attributes?.["exception.message"]).not.toContain(unkeywordedSecret);
+
+    // Verify span status, attributes, and events contain zero occurrence of the secret
+    expect(failedSpan.status.message).not.toContain(unkeywordedSecret);
+    for (const [, v] of Object.entries(failedSpan.attributes)) {
+      expect(String(v)).not.toContain(unkeywordedSecret);
+    }
+    for (const ev of failedSpan.events) {
+      for (const [, v] of Object.entries(ev.attributes || {})) {
+        expect(String(v)).not.toContain(unkeywordedSecret);
+      }
+    }
   });
 
   it("proves structured log entries correlate with active OpenTelemetry trace ID and span ID", async () => {

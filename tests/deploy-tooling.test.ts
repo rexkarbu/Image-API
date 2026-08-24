@@ -43,7 +43,7 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
       expect(u2.origin).toBe("https://custom-domain.com");
     });
 
-    it("rejects insecure remote HTTP URLs", () => {
+    it("rejects insecure remote HTTP URLs without leaking URL", () => {
       expect(() => validateTargetUrl("http://custom-domain.com")).toThrow(/must use HTTPS/);
       expect(() => validateTargetUrl("http://api.production.org")).toThrow(/must use HTTPS/);
     });
@@ -66,12 +66,12 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
       );
     });
 
-    it("rejects URLs with non-root path segments", () => {
-      expect(() => validateTargetUrl("https://custom-domain.com/api")).toThrow(
-        /origin root without path segments/
+    it("rejects URLs with non-root path segments without echoing sensitive path in error", () => {
+      expect(() => validateTargetUrl("https://custom-domain.com/secret_api_key_path")).toThrow(
+        "Target URL must be an origin root without path segments."
       );
       expect(() => validateTargetUrl("http://localhost:3000/docs")).toThrow(
-        /origin root without path segments/
+        "Target URL must be an origin root without path segments."
       );
     });
 
@@ -115,50 +115,47 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
     });
   });
 
-  describe("safeFetch Bounded Single-Request Semantics (Local HTTP Server)", () => {
+  describe("safeFetch & runDeployVerify Controlled HTTP Mock Proofs", () => {
     let server: http.Server;
     let port: number;
-    let requestCount = 0;
-    let lastHeaders: http.IncomingHttpHeaders | null = null;
-    let lastPath = "";
+    const requestLog: Array<{ path: string; headers: http.IncomingHttpHeaders }> = [];
 
     beforeAll(async () => {
       server = http.createServer((req, res) => {
-        requestCount++;
-        lastHeaders = req.headers;
-        lastPath = req.url || "";
+        const url = req.url || "";
+        requestLog.push({ path: url, headers: req.headers });
 
-        if (req.url === "/timeout") {
+        if (url === "/timeout") {
           // Do not respond, let client timeout
           return;
         }
 
-        if (req.url === "/redirect") {
+        if (url === "/redirect") {
           res.writeHead(302, { Location: "/target" });
           res.end();
           return;
         }
 
-        if (req.url === "/oversized") {
+        if (url === "/oversized") {
           res.writeHead(200, { "Content-Type": "application/json" });
           // Send 70KB (> 64KB limit)
           res.end(Buffer.alloc(70 * 1024, "a"));
           return;
         }
 
-        if (req.url === "/malformed-json") {
+        if (url === "/malformed-json") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end("{ bad json");
           return;
         }
 
-        if (req.url === "/api/health/live") {
+        if (url === "/api/health/live") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "ok", service: "image-api" }));
           return;
         }
 
-        if (req.url === "/api/health/ready") {
+        if (url === "/api/health/ready") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
@@ -167,6 +164,23 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
               checks: { database: "healthy", redis: "healthy" },
             })
           );
+          return;
+        }
+
+        if (url === "/openapi.json") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              openapi: "3.1.1",
+              paths: { "/v1/images/transform": {} },
+            })
+          );
+          return;
+        }
+
+        if (url === "/docs") {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end("<!DOCTYPE html><html><head><title>Docs</title></head><body>Docs</body></html>");
           return;
         }
 
@@ -188,14 +202,12 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
     });
 
     beforeEach(() => {
-      requestCount = 0;
-      lastHeaders = null;
-      lastPath = "";
+      requestLog.length = 0;
     });
 
     it("proves safeFetch performs exactly one request and parses JSON from the same response bytes", async () => {
       const result = await safeFetch(`http://127.0.0.1:${port}/api/health/live`);
-      expect(requestCount).toBe(1);
+      expect(requestLog.length).toBe(1);
       expect(result.status).toBe(200);
       expect(result.text).toContain("image-api");
       const json = result.json();
@@ -203,7 +215,7 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
       expect(json.service).toBe("image-api");
       // Calling json() repeatedly uses cached text without performing additional requests
       expect(result.json().status).toBe("ok");
-      expect(requestCount).toBe(1);
+      expect(requestLog.length).toBe(1);
     });
 
     it("aborts and throws on request timeout", async () => {
@@ -226,6 +238,43 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
       const result = await safeFetch(`http://127.0.0.1:${port}/malformed-json`);
       expect(result.status).toBe(200);
       expect(() => result.json()).toThrow(/Invalid JSON/);
+    });
+
+    it("proves runDeployVerify sends HEALTHCHECK_SECRET ONLY to /api/health/ready and exactly 1 request per route", async () => {
+      const secret = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+      const origSecret = process.env.HEALTHCHECK_SECRET;
+
+      try {
+        process.env.HEALTHCHECK_SECRET = secret;
+        await runDeployVerify(`http://127.0.0.1:${port}`);
+
+        // Exactly 4 requests total across 4 distinct routes
+        expect(requestLog.length).toBe(4);
+
+        const liveReq = requestLog.find((r) => r.path === "/api/health/live");
+        const readyReq = requestLog.find((r) => r.path === "/api/health/ready");
+        const openApiReq = requestLog.find((r) => r.path === "/openapi.json");
+        const docsReq = requestLog.find((r) => r.path === "/docs");
+
+        expect(liveReq).toBeDefined();
+        expect(readyReq).toBeDefined();
+        expect(openApiReq).toBeDefined();
+        expect(docsReq).toBeDefined();
+
+        // 1. /api/health/ready receives Authorization: Bearer <secret>
+        expect(readyReq!.headers.authorization).toBe(`Bearer ${secret}`);
+
+        // 2. /api/health/live receives NO Authorization header
+        expect(liveReq!.headers.authorization).toBeUndefined();
+
+        // 3. /openapi.json receives NO Authorization header
+        expect(openApiReq!.headers.authorization).toBeUndefined();
+
+        // 4. /docs receives NO Authorization header
+        expect(docsReq!.headers.authorization).toBeUndefined();
+      } finally {
+        process.env.HEALTHCHECK_SECRET = origSecret;
+      }
     });
   });
 });

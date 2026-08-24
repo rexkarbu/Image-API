@@ -41,13 +41,13 @@ export function validateTargetUrl(rawUrl: string): URL {
 
   // Reject non-root pathnames
   if (parsed.pathname && parsed.pathname !== "/" && parsed.pathname !== "") {
-    throw new Error(`Target URL must be an origin root without path segments. Received pathname: ${parsed.pathname}`);
+    throw new Error("Target URL must be an origin root without path segments.");
   }
 
   // Enforce HTTPS for remote URLs
   const isLoopback = isLoopbackHostname(parsed.hostname);
   if (!isLoopback && parsed.protocol !== "https:") {
-    throw new Error(`Production/remote deployment URLs must use HTTPS. Received: ${parsed.protocol}`);
+    throw new Error("Production/remote deployment URLs must use HTTPS.");
   }
 
   return parsed;

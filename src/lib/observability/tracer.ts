@@ -90,23 +90,14 @@ export function getTracer() {
 export type SpanAttributes = Record<string, string | number | boolean | undefined>;
 
 /**
- * Sanitizes an exception to ensure zero secrets or raw SQL/payloads leak into traces.
+ * Sanitizes an exception to record only the normalized bounded error code on traces.
+ * Arbitrary error.message, stacks, and sensitive texts are never exported to span exceptions.
  */
 export function sanitizeException(error: unknown): Exception {
-  if (error instanceof Error) {
-    const rawCode = (error as { code?: string })?.code || error.name || "Error";
-    const safeCode = ERROR_CODE_REGEX.test(rawCode) ? rawCode : "INTERNAL_ERROR";
-
-    let safeMessage = error.message;
-    if (SENSITIVE_VALUE_REGEX.test(safeMessage) || safeMessage.length > 200) {
-      safeMessage = safeCode;
-    }
-    const safeError = new Error(safeMessage);
-    safeError.name = error.name && error.name !== "Error" ? error.name : error.constructor?.name || "Error";
-    return safeError;
-  }
-
-  return new Error("INTERNAL_ERROR");
+  const safeCode = normalizeErrorCode(error);
+  const safeError = new Error(safeCode);
+  safeError.name = safeCode;
+  return safeError;
 }
 
 /**

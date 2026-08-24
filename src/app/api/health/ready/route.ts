@@ -3,7 +3,7 @@ import { pool } from "@/db";
 import { getRedisClient } from "@/lib/ratelimit/redis-safety";
 import { resolveRequestId, logger } from "@/lib/observability/logger";
 import { withSpan } from "@/lib/observability/tracer";
-import { verifyHealthAuth, evaluateReadiness } from "@/lib/health/readiness-core";
+import { verifyHealthAuth, evaluateReadiness, createBoundedRedisClient } from "@/lib/health/readiness-core";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -55,7 +55,7 @@ export async function GET(request: Request) {
       const checkResult = await evaluateReadiness(
         {
           pool,
-          redis: getRedisClient(),
+          redis: createBoundedRedisClient(2000),
         },
         2000
       );

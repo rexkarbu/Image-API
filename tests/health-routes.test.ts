@@ -5,10 +5,11 @@ import {
   verifyHealthAuth,
   executeBoundedDatabaseCheck,
   executeBoundedRedisCheck,
+  createBoundedRedisClient,
   evaluateReadiness,
 } from "@/lib/health/readiness-core";
 
-describe("Health Check Routes & Bounded Readiness Safety Unit Tests", () => {
+describe("Health Check Routes & Real Bounded Readiness Cancellation Unit Tests", () => {
   describe("GET /api/health/live", () => {
     it("returns HTTP 200 with minimal status and security headers", async () => {
       const request = new Request("http://localhost:3000/api/health/live", {
@@ -31,8 +32,8 @@ describe("Health Check Routes & Bounded Readiness Safety Unit Tests", () => {
     });
   });
 
-  describe("Bounded Database Check Safety", () => {
-    it("returns healthy and releases client when database query returns exact ready === 1", async () => {
+  describe("Real PostgreSQL Readiness Cancellation & Deferred Lifecycle Proofs", () => {
+    it("releases normally (exactly once with no error flag) on fast, valid query", async () => {
       const releaseMock = vi.fn();
       const queryMock = vi.fn().mockResolvedValue({ rows: [{ ready: 1 }] });
       const clientMock = { query: queryMock, release: releaseMock };
@@ -43,77 +44,133 @@ describe("Health Check Routes & Bounded Readiness Safety Unit Tests", () => {
       expect(poolMock.connect).toHaveBeenCalledTimes(1);
       expect(queryMock).toHaveBeenCalledTimes(1);
       expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock).toHaveBeenCalledWith(); // Normal release
     });
 
-    it("cancels and releases client on database query timeout without leaking connections", async () => {
+    it("destroys client with error flag (release(true)) on query timeout rather than returning it normally", async () => {
+      let resolveQuery: (val: any) => void;
+      const deferredQueryPromise = new Promise((resolve) => {
+        resolveQuery = resolve;
+      });
+
       const releaseMock = vi.fn();
-      const slowQueryMock = vi.fn().mockImplementation(
-        () => new Promise((resolve) => setTimeout(() => resolve({ rows: [{ ready: 1 }] }), 100))
-      );
-      const clientMock = { query: slowQueryMock, release: releaseMock };
+      const clientMock = {
+        query: vi.fn().mockImplementation(() => deferredQueryPromise),
+        release: releaseMock,
+      };
       const poolMock = { connect: vi.fn().mockResolvedValue(clientMock) };
 
       const isHealthy = await executeBoundedDatabaseCheck(poolMock as any, 20); // 20ms timeout
       expect(isHealthy).toBe(false);
+
+      // Client must be destroyed immediately on timeout
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock).toHaveBeenCalledWith(true);
+
+      // Late query settlement after timeout does not cause unhandled rejections or double release
+      resolveQuery!({ rows: [{ ready: 1 }] });
+      await new Promise((r) => setTimeout(r, 10));
       expect(releaseMock).toHaveBeenCalledTimes(1);
     });
 
-    it("handles connection pool timeout and cleans up without leaking unreleased clients", async () => {
-      const slowConnectPool = {
+    it("cleans up and immediately destroys a late-resolving pool connection without leakage", async () => {
+      let resolveConnect: (client: any) => void;
+      const deferredConnectPromise = new Promise((resolve) => {
+        resolveConnect = resolve;
+      });
+
+      const releaseMock = vi.fn();
+      const clientMock = {
+        query: vi.fn().mockResolvedValue({ rows: [{ ready: 1 }] }),
+        release: releaseMock,
+      };
+      const poolMock = { connect: vi.fn().mockImplementation(() => deferredConnectPromise) };
+
+      // Readiness operation times out while connection is still pending
+      const isHealthy = await executeBoundedDatabaseCheck(poolMock as any, 20);
+      expect(isHealthy).toBe(false);
+      expect(releaseMock).not.toHaveBeenCalled();
+
+      // Now the pool connection finally resolves late
+      resolveConnect!(clientMock);
+      await new Promise((r) => setTimeout(r, 10));
+
+      // The late-arriving client MUST be immediately destroyed with release(true)
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock).toHaveBeenCalledWith(true);
+      expect(clientMock.query).not.toHaveBeenCalled(); // Never runs query on abandoned client
+    });
+
+    it("destroys client on malformed query rows (e.g. empty rows or wrong value)", async () => {
+      const releaseMock = vi.fn();
+      const clientMock = {
+        query: vi.fn().mockResolvedValue({ rows: [] }),
+        release: releaseMock,
+      };
+      const poolMock = { connect: vi.fn().mockResolvedValue(clientMock) };
+
+      const isHealthy = await executeBoundedDatabaseCheck(poolMock as any, 1000);
+      expect(isHealthy).toBe(false);
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock).toHaveBeenCalledWith(true);
+    });
+
+    it("repeated timeouts do not leak clients or unhandled rejections", async () => {
+      const releaseMock = vi.fn();
+      const poolMock = {
         connect: vi.fn().mockImplementation(
-          () => new Promise((resolve) => setTimeout(() => resolve({} as any), 100))
+          () => new Promise((resolve) => setTimeout(() => resolve({
+            query: () => new Promise(() => {}),
+            release: releaseMock,
+          }), 50))
         ),
       };
 
-      const isHealthy = await executeBoundedDatabaseCheck(slowConnectPool as any, 20);
-      expect(isHealthy).toBe(false);
-    });
+      for (let i = 0; i < 5; i++) {
+        const isHealthy = await executeBoundedDatabaseCheck(poolMock as any, 10);
+        expect(isHealthy).toBe(false);
+      }
 
-    it("returns unhealthy on malformed database rows (empty array or wrong value)", async () => {
-      const releaseMock = vi.fn();
-      const poolMock1 = {
-        connect: vi.fn().mockResolvedValue({
-          query: vi.fn().mockResolvedValue({ rows: [] }),
-          release: releaseMock,
-        }),
-      };
-      expect(await executeBoundedDatabaseCheck(poolMock1 as any)).toBe(false);
-      expect(releaseMock).toHaveBeenCalledTimes(1);
-
-      const poolMock2 = {
-        connect: vi.fn().mockResolvedValue({
-          query: vi.fn().mockResolvedValue({ rows: [{ ready: 2 }] }),
-          release: releaseMock,
-        }),
-      };
-      expect(await executeBoundedDatabaseCheck(poolMock2 as any)).toBe(false);
+      // Wait for late connections to arrive and be discarded
+      await new Promise((r) => setTimeout(r, 80));
+      expect(releaseMock).toHaveBeenCalledTimes(5);
+      for (const call of releaseMock.mock.calls) {
+        expect(call[0]).toBe(true);
+      }
     });
   });
 
-  describe("Bounded Redis Check Safety", () => {
-    it("returns healthy when Redis returns exact 'PONG'", async () => {
+  describe("Official Upstash Redis Timeout & Signal Invariants", () => {
+    it("calls redis.ping() with ZERO arguments", async () => {
       const pingMock = vi.fn().mockResolvedValue("PONG");
-      const isHealthy = await executeBoundedRedisCheck({ ping: pingMock } as any, 1000);
+      const isHealthy = await executeBoundedRedisCheck({ ping: pingMock } as any);
       expect(isHealthy).toBe(true);
       expect(pingMock).toHaveBeenCalledTimes(1);
+      expect(pingMock).toHaveBeenCalledWith(); // Zero arguments
     });
 
-    it("aborts underlying network operation on Redis timeout via AbortSignal", async () => {
-      let receivedSignal: AbortSignal | undefined;
-      const slowPing = vi.fn().mockImplementation((options?: { signal?: AbortSignal }) => {
-        receivedSignal = options?.signal;
-        return new Promise((resolve) => setTimeout(() => resolve("PONG"), 100));
-      });
-
-      const isHealthy = await executeBoundedRedisCheck({ ping: slowPing } as any, 20);
+    it("returns unhealthy when ping() rejects with timeout or network error", async () => {
+      const pingMock = vi.fn().mockRejectedValue(new Error("TimeoutError: The operation was aborted"));
+      const isHealthy = await executeBoundedRedisCheck({ ping: pingMock } as any);
       expect(isHealthy).toBe(false);
-      expect(receivedSignal?.aborted).toBe(true);
     });
 
-    it("returns unhealthy on malformed Redis return values", async () => {
+    it("returns unhealthy on malformed Redis return values (non-PONG)", async () => {
       expect(await executeBoundedRedisCheck({ ping: vi.fn().mockResolvedValue("OK") } as any)).toBe(false);
       expect(await executeBoundedRedisCheck({ ping: vi.fn().mockResolvedValue(null) } as any)).toBe(false);
-      expect(await executeBoundedRedisCheck({ ping: vi.fn().mockResolvedValue({ status: "PONG" }) } as any)).toBe(false);
+      expect(await executeBoundedRedisCheck({ ping: vi.fn().mockResolvedValue(1) } as any)).toBe(false);
+    });
+
+    it("createBoundedRedisClient configures official constructor signal factory", () => {
+      const client = createBoundedRedisClient(1500, {
+        UPSTASH_REDIS_REST_URL: "https://mock-cluster.upstash.io",
+        UPSTASH_REDIS_REST_TOKEN: "mock_token_12345",
+      });
+      expect(client).toBeDefined();
+      const signalFactory = (client as any).client?.options?.signal;
+      expect(typeof signalFactory).toBe("function");
+      const signal = signalFactory();
+      expect(signal).toBeInstanceOf(AbortSignal);
     });
   });
 

@@ -5,6 +5,7 @@ import {
   validateDevelopmentRedisSafety,
   assertRedisDevelopmentSafety,
   extractUpstashEndpointId,
+  getValidatedRedisConfig,
   type RedisSafetyEnv,
   type ExtractedRedisEndpoint,
 } from "./redis-safety-core";
@@ -14,6 +15,7 @@ export {
   validateDevelopmentRedisSafety,
   assertRedisDevelopmentSafety,
   extractUpstashEndpointId,
+  getValidatedRedisConfig,
   type RedisSafetyEnv,
   type ExtractedRedisEndpoint,
 };
