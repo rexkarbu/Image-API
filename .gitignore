@@ -20,6 +20,10 @@ dist/
 .env.*
 !.env.example
 
+# Vercel
+.vercel/
+.env.vercel-*.local
+
 # Debug / Logs
 npm-debug.log*
 yarn-debug.log*

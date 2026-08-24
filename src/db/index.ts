@@ -20,10 +20,21 @@ declare global {
 }
 
 function getConnectionString(): string {
-  return (
-    process.env.DATABASE_URL ||
-    "postgres://postgres:postgres@localhost:5432/image_api_db"
-  );
+  const url = process.env.DATABASE_URL;
+  const isProductionOrPreview =
+    process.env.NODE_ENV === "production" ||
+    process.env.VERCEL_ENV === "production" ||
+    process.env.VERCEL_ENV === "preview";
+
+  if (url && url.trim() !== "") {
+    return url.trim();
+  }
+
+  if (!isProductionOrPreview) {
+    return "postgres://postgres:postgres@localhost:5432/image_api_db";
+  }
+
+  throw new Error("Production Configuration Error: DATABASE_URL is missing.");
 }
 
 function getDatabasePool(): Pool {

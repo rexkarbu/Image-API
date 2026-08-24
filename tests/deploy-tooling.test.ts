@@ -1,7 +1,18 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { validateTargetUrl, isLoopbackHostname, safeFetch, runDeployVerify } from "@/scripts/deploy-verify";
-import { validateHealthcheckSecret } from "@/scripts/deploy-preflight";
+import {
+  validateHealthcheckSecret,
+  validateCronSecret,
+  validateBetterAuthSecret,
+  validateEnvironmentInvariants,
+} from "@/scripts/deploy-preflight";
+import {
+  resolveApplicationOrigin,
+  sanitizeAndValidateOrigin,
+} from "@/lib/security/origin";
 
 describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () => {
   describe("isLoopbackHostname", () => {
@@ -17,6 +28,176 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
       expect(isLoopbackHostname("api.example.com")).toBe(false);
       expect(isLoopbackHostname("192.168.1.1")).toBe(false);
       expect(isLoopbackHostname("10.0.0.1")).toBe(false);
+    });
+  });
+
+  describe("Canonical Origin Resolver (src/lib/security/origin.ts)", () => {
+    it("permits http://localhost:3000 in local development mode", () => {
+      const origin = resolveApplicationOrigin({
+        env: { NODE_ENV: "development" },
+      });
+      expect(origin).toBe("http://localhost:3000");
+    });
+
+    it("resolves explicit BETTER_AUTH_URL and NEXT_PUBLIC_APP_URL", () => {
+      const origin1 = resolveApplicationOrigin({
+        env: {
+          NODE_ENV: "production",
+          BETTER_AUTH_URL: "https://api.imageapi.dev",
+        },
+      });
+      expect(origin1).toBe("https://api.imageapi.dev");
+
+      const origin2 = resolveApplicationOrigin({
+        env: {
+          NODE_ENV: "production",
+          NEXT_PUBLIC_APP_URL: "https://custom-app.com",
+        },
+      });
+      expect(origin2).toBe("https://custom-app.com");
+    });
+
+    it("resolves Vercel preview system variables in preview environment", () => {
+      const branchOrigin = resolveApplicationOrigin({
+        env: {
+          NODE_ENV: "production",
+          VERCEL_ENV: "preview",
+          VERCEL_BRANCH_URL: "hlf-git-m6-1-artha8.vercel.app",
+        },
+      });
+      expect(branchOrigin).toBe("https://hlf-git-m6-1-artha8.vercel.app");
+
+      const previewOrigin = resolveApplicationOrigin({
+        env: {
+          NODE_ENV: "production",
+          VERCEL_ENV: "preview",
+          VERCEL_URL: "hlf-32706139453-artha8.vercel.app",
+        },
+      });
+      expect(previewOrigin).toBe("https://hlf-32706139453-artha8.vercel.app");
+    });
+
+    it("rejects insecure HTTP origins and loopback origins in deployed production and preview", () => {
+      expect(() =>
+        resolveApplicationOrigin({
+          env: {
+            NODE_ENV: "production",
+            VERCEL_ENV: "production",
+            BETTER_AUTH_URL: "http://insecure-domain.com",
+          },
+        })
+      ).toThrow(/remote Preview and Production URLs must use HTTPS/);
+
+      expect(() =>
+        resolveApplicationOrigin({
+          env: {
+            NODE_ENV: "production",
+            VERCEL_ENV: "preview",
+            BETTER_AUTH_URL: "http://insecure-domain.com",
+          },
+        })
+      ).toThrow(/remote Preview and Production URLs must use HTTPS/);
+
+      expect(() =>
+        resolveApplicationOrigin({
+          env: {
+            NODE_ENV: "production",
+            VERCEL_ENV: "preview",
+            BETTER_AUTH_URL: "http://localhost:3000",
+          },
+        })
+      ).toThrow(/loopback origins are not permitted in deployed Vercel environments/);
+    });
+
+    it("adversarial origin validation rejects query strings, path segments, and credentials", () => {
+      expect(() => sanitizeAndValidateOrigin("https://api.domain.com/auth")).toThrow(/without path segments/);
+      expect(() => sanitizeAndValidateOrigin("https://api.domain.com?token=secret")).toThrow(/query parameters/);
+      expect(() => sanitizeAndValidateOrigin("https://api.domain.com#section")).toThrow(/hash fragments/);
+      expect(() => sanitizeAndValidateOrigin("https://user:pass@api.domain.com")).toThrow(/embedded credentials/);
+      expect(() => sanitizeAndValidateOrigin("ftp://api.domain.com")).toThrow(/only http: and https:/);
+    });
+  });
+
+  describe("Preflight Invariant Validation (src/scripts/deploy-preflight.ts)", () => {
+    const validSecret64 = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const validBetterAuthSecret = "0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    const baseValidPreviewEnv: Record<string, string> = {
+      NODE_ENV: "production",
+      VERCEL_ENV: "preview",
+      DATABASE_URL: "postgresql://user:pass@ep-pooler.neon.tech/neondb?sslmode=verify-full",
+      DATABASE_ENV: "staging",
+      UPSTASH_REDIS_REST_URL: "https://staging-redis.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "valid_staging_token_12345",
+      REDIS_ENV: "staging",
+      BETTER_AUTH_SECRET: validBetterAuthSecret,
+      BETTER_AUTH_URL: "https://preview-app.vercel.app",
+      RATE_LIMIT_IDENTIFIER_SECRET: validSecret64,
+      HEALTHCHECK_SECRET: validSecret64,
+      CRON_SECRET: validSecret64,
+      STRIPE_ENV: "test",
+      STRIPE_SECRET_KEY: "sk_test_mock_secret_key_12345",
+    };
+
+    it("passes validation for valid preview environment", () => {
+      expect(() => validateEnvironmentInvariants(baseValidPreviewEnv)).not.toThrow();
+    });
+
+    it("rejects preview environment with wrong DATABASE_ENV or REDIS_ENV", () => {
+      expect(() =>
+        validateEnvironmentInvariants({
+          ...baseValidPreviewEnv,
+          DATABASE_ENV: "production",
+        })
+      ).toThrow(/Preview requires DATABASE_ENV='staging'/);
+
+      expect(() =>
+        validateEnvironmentInvariants({
+          ...baseValidPreviewEnv,
+          REDIS_ENV: "production",
+        })
+      ).toThrow(/Preview requires REDIS_ENV='staging'/);
+    });
+
+    it("rejects integration test flags enabled on Vercel runtime", () => {
+      expect(() =>
+        validateEnvironmentInvariants({
+          ...baseValidPreviewEnv,
+          RUN_DB_INTEGRATION_TESTS: "true",
+        })
+      ).toThrow(/RUN_DB_INTEGRATION_TESTS must not be enabled in Vercel runtime/);
+
+      expect(() =>
+        validateEnvironmentInvariants({
+          ...baseValidPreviewEnv,
+          RUN_REDIS_INTEGRATION_TESTS: "true",
+        })
+      ).toThrow(/RUN_REDIS_INTEGRATION_TESTS must not be enabled in Vercel runtime/);
+    });
+
+    it("rejects live-mode Stripe keys in preflight", () => {
+      expect(() =>
+        validateEnvironmentInvariants({
+          ...baseValidPreviewEnv,
+          STRIPE_SECRET_KEY: "sk_live_live_secret_is_forbidden",
+        })
+      ).toThrow(/STRIPE_SECRET_KEY must start with 'sk_test_'/);
+    });
+  });
+
+  describe("vercel.json Configuration Invariants", () => {
+    it("verifies vercel.json contains daily billing cron and official schema", () => {
+      const vercelJsonPath = path.resolve(process.cwd(), "vercel.json");
+      expect(fs.existsSync(vercelJsonPath)).toBe(true);
+
+      const content = JSON.parse(fs.readFileSync(vercelJsonPath, "utf8"));
+      expect(content.$schema).toContain("vercel.json");
+      expect(Array.isArray(content.crons)).toBe(true);
+      expect(content.crons.length).toBe(1);
+
+      const cron = content.crons[0];
+      expect(cron.path).toBe("/api/cron/billing");
+      expect(cron.schedule).toBe("5 0 * * *");
     });
   });
 
@@ -126,7 +307,6 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
         requestLog.push({ path: url, headers: req.headers });
 
         if (url === "/timeout") {
-          // Do not respond, let client timeout
           return;
         }
 
@@ -138,7 +318,6 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
 
         if (url === "/oversized") {
           res.writeHead(200, { "Content-Type": "application/json" });
-          // Send 70KB (> 64KB limit)
           res.end(Buffer.alloc(70 * 1024, "a"));
           return;
         }
@@ -213,7 +392,6 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
       const json = result.json();
       expect(json.status).toBe("ok");
       expect(json.service).toBe("image-api");
-      // Calling json() repeatedly uses cached text without performing additional requests
       expect(result.json().status).toBe("ok");
       expect(requestLog.length).toBe(1);
     });
@@ -248,7 +426,6 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
         process.env.HEALTHCHECK_SECRET = secret;
         await runDeployVerify(`http://127.0.0.1:${port}`);
 
-        // Exactly 4 requests total across 4 distinct routes
         expect(requestLog.length).toBe(4);
 
         const liveReq = requestLog.find((r) => r.path === "/api/health/live");
@@ -261,16 +438,9 @@ describe("Deployment Tooling, URL Safety & Single-Request safeFetch Tests", () =
         expect(openApiReq).toBeDefined();
         expect(docsReq).toBeDefined();
 
-        // 1. /api/health/ready receives Authorization: Bearer <secret>
         expect(readyReq!.headers.authorization).toBe(`Bearer ${secret}`);
-
-        // 2. /api/health/live receives NO Authorization header
         expect(liveReq!.headers.authorization).toBeUndefined();
-
-        // 3. /openapi.json receives NO Authorization header
         expect(openApiReq!.headers.authorization).toBeUndefined();
-
-        // 4. /docs receives NO Authorization header
         expect(docsReq!.headers.authorization).toBeUndefined();
       } finally {
         process.env.HEALTHCHECK_SECRET = origSecret;

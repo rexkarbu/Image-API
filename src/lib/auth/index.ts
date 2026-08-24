@@ -2,6 +2,25 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { db } from "@/db";
 import * as schema from "@/db/schema";
+import { resolveApplicationOrigin } from "@/lib/security/origin";
+
+function getBetterAuthSecret(): string {
+  const secret = process.env.BETTER_AUTH_SECRET;
+  const isProductionOrPreview =
+    process.env.NODE_ENV === "production" ||
+    process.env.VERCEL_ENV === "production" ||
+    process.env.VERCEL_ENV === "preview";
+
+  if (secret && secret.trim().length >= 32) {
+    return secret.trim();
+  }
+
+  if (!isProductionOrPreview) {
+    return "development-and-build-placeholder-secret-min-32-chars-long";
+  }
+
+  throw new Error("Production Configuration Error: BETTER_AUTH_SECRET must be at least 32 characters.");
+}
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -17,11 +36,6 @@ export const auth = betterAuth({
     enabled: true,
     autoSignIn: true,
   },
-  secret:
-    process.env.BETTER_AUTH_SECRET ||
-    "development-and-build-placeholder-secret-min-32-chars-long",
-  baseURL:
-    process.env.BETTER_AUTH_URL ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    "http://localhost:3000",
+  secret: getBetterAuthSecret(),
+  baseURL: resolveApplicationOrigin(),
 });
